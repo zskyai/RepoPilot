@@ -147,6 +147,94 @@ class GitHubOps:
             payload = {"raw": completed.stdout.strip()}
         return {"ok": True, "checks": payload}
 
+    def ci_feedback(self, pr_number: int) -> dict[str, Any]:
+        checks = self.pr_checks(pr_number)
+        if not checks.get("ok"):
+            return checks
+        check_runs = checks.get("checks") or []
+        failed = [
+            item
+            for item in check_runs
+            if item.get("conclusion") not in (None, "success", "skipped", "neutral")
+        ]
+        pending = [item for item in check_runs if item.get("status") != "completed"]
+        annotations: list[dict[str, Any]] = []
+        for item in failed[:5]:
+            annotations.extend(self.check_annotations(int(item.get("id") or 0)).get("annotations", [])[:10])
+        summary = {
+            "ok": True,
+            "passed": bool(check_runs) and not failed and not pending,
+            "total": len(check_runs),
+            "failed": [
+                {
+                    "name": item.get("name"),
+                    "status": item.get("status"),
+                    "conclusion": item.get("conclusion"),
+                    "details_url": item.get("details_url") or item.get("html_url"),
+                    "started_at": item.get("started_at"),
+                    "completed_at": item.get("completed_at"),
+                }
+                for item in failed
+            ],
+            "pending": [
+                {
+                    "name": item.get("name"),
+                    "status": item.get("status"),
+                    "details_url": item.get("details_url") or item.get("html_url"),
+                }
+                for item in pending
+            ],
+            "annotations": annotations,
+        }
+        summary["repair_context"] = self.format_repair_context(summary)
+        return summary
+
+    def check_annotations(self, check_run_id: int) -> dict[str, Any]:
+        if not check_run_id:
+            return {"ok": False, "annotations": [], "error": "missing check_run_id"}
+        slug = self.repo_slug()
+        if not slug:
+            return {"ok": False, "annotations": [], "error": "Could not infer GitHub repo slug from origin remote."}
+        if self.command_exists("gh") and self.is_authenticated():
+            completed = subprocess.run(
+                [
+                    "gh",
+                    "api",
+                    f"/repos/{slug}/check-runs/{check_run_id}/annotations",
+                ],
+                cwd=self.repo,
+                capture_output=True,
+                text=True,
+                timeout=60,
+                shell=False,
+            )
+            if completed.returncode != 0:
+                return {"ok": False, "annotations": [], "error": completed.stderr[-1000:]}
+            try:
+                return {"ok": True, "annotations": json.loads(completed.stdout or "[]")}
+            except json.JSONDecodeError:
+                return {"ok": False, "annotations": [], "error": completed.stdout[-1000:]}
+        response = self._api_request("GET", f"/repos/{slug}/check-runs/{check_run_id}/annotations")
+        if not response.get("ok"):
+            return {"ok": False, "annotations": [], "error": response.get("error", "")}
+        return {"ok": True, "annotations": response.get("data") or []}
+
+    def format_repair_context(self, feedback: dict[str, Any]) -> str:
+        if feedback.get("passed"):
+            return "CI passed. No repair needed."
+        lines = ["CI feedback for repair:"]
+        for item in feedback.get("failed", []):
+            lines.append(
+                f"- FAILED {item.get('name')} conclusion={item.get('conclusion')} url={item.get('details_url')}"
+            )
+        for item in feedback.get("pending", []):
+            lines.append(f"- PENDING {item.get('name')} status={item.get('status')}")
+        for ann in feedback.get("annotations", [])[:20]:
+            path = ann.get("path") or ann.get("annotation_level") or "unknown"
+            message = ann.get("message") or ann.get("raw_details") or ""
+            lines.append(f"- ANNOTATION {path}:{ann.get('start_line')} {message[:500]}")
+        return "\n".join(lines)
+
     def comment_on_pr(self, pr_number: int, body: str) -> dict[str, Any]:
         if not self.is_authenticated():
             return {"ok": False, "error": "gh is unavailable or not authenticated."}
