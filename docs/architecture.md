@@ -13,6 +13,8 @@ RepoPilot is a Coding Agent that combines:
 - test execution
 - repair loop
 - GitHub PR / CI integration
+- CI feedback repair context
+- long-term repair memory
 - evaluation and PR readiness
 
 ## Agent Roles
@@ -22,6 +24,8 @@ Tool agents:
 - RepoIndexer
 - CodeRetriever
 - TestRunner
+- MemoryStore
+- GitHubOps
 
 LLM agents:
 
@@ -41,6 +45,12 @@ plan -> act -> verify -> repair -> judge -> pr_ready
 
 The graph is no longer just a migration placeholder. It is the production execution path used by `run_repo_pilot.py --graph` and `run_benchmark.py`.
 
+## Long-Term Memory
+
+RepoPilot stores compact repair memories in `.repopilot/memory.sqlite3`.
+
+On each run it can recall semantically similar previous issues and feed them into root-cause analysis. At the end of the run it saves the issue, suspected files, patch checks, evaluation, and GitHub CI feedback. This turns repeated repository work into accumulated repair evidence instead of isolated one-off prompts.
+
 ## Repair Loop
 
 RepoPilot now performs a real patch repair cycle in sandbox:
@@ -53,6 +63,10 @@ RepoPilot now performs a real patch repair cycle in sandbox:
 
 This keeps the original repository clean while producing evidence-backed repair attempts.
 
+## GitHub CI Feedback
+
+When a PR number is available, RepoPilot can read GitHub check runs, summarize failed/pending checks, collect annotations, and produce repair context for the next agent iteration. It can also write validation comments back to the PR.
+
 ## Verification Layers
 
 RepoPilot uses multiple verification layers:
@@ -63,6 +77,7 @@ RepoPilot uses multiple verification layers:
 4. smoke check
 5. rubric score
 6. LLM Judge score
+7. GitHub CI checks
 
 The design principle is:
 
