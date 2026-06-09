@@ -36,9 +36,11 @@ def load_dotenv(path: str | Path = ".env") -> None:
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, value = line.split("=", 1)
-        key = key.strip()
+        key = key.strip().lstrip("\ufeff")
         value = value.strip().strip('"').strip("'")
-        os.environ.setdefault(key, value)
+        current = os.environ.get(key)
+        if current in (None, ""):
+            os.environ[key] = value
 
 
 class OpenAICompatibleClient:

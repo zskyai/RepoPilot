@@ -16,7 +16,7 @@ from typing import Any
 from app.core.github_ops import GitHubOps
 from app.core.llm import LLMClient, build_llm
 from app.core.models import Evidence, ResearchTask, TaskStatus
-from app.core.retrieval import RetrievalScore, build_embedding_client, cosine_similarity
+from app.core.retrieval import RetrievalScore, build_embedding_client, cosine_similarity, resilient_embed_texts
 from app.rag.index import tokenize
 
 
@@ -347,6 +347,7 @@ class RepoRetriever:
     def __init__(self, chunks: list[CodeChunk]) -> None:
         self.chunks = chunks
         self.embedding_client = build_embedding_client()
+        self.embedding_provider = getattr(self.embedding_client, "provider", "unknown")
         self.chunk_terms = [
             set(
                 tokenize(
@@ -362,7 +363,8 @@ class RepoRetriever:
             for chunk in chunks
         ]
         self.chunk_counters = [Counter(terms) for terms in self.chunk_terms]
-        self.chunk_vectors = self.embedding_client.embed_texts(
+        self.chunk_vectors, self.embedding_provider = resilient_embed_texts(
+            self.embedding_client,
             [
                 chunk.path
                 + "\n"
@@ -372,13 +374,14 @@ class RepoRetriever:
                 + "\n"
                 + chunk.content
                 for chunk in chunks
-            ]
+            ],
         )
 
     def search(self, query: str, top_k: int = 8) -> list[Evidence]:
         query_terms = set(tokenize(query))
         query_counter = Counter(tokenize(query))
-        query_vector = self.embedding_client.embed_texts([query])[0]
+        query_vector, _query_provider = resilient_embed_texts(self.embedding_client, [query])
+        query_vector = query_vector[0]
         scored: list[tuple[float, CodeChunk, list[float]]] = []
         for chunk, terms, counter, vector in zip(
             self.chunks,
@@ -414,7 +417,7 @@ class RepoRetriever:
             semantic=round(float(semantic), 4),
             structural=round(float(structural), 4),
             total=round(score, 4),
-            provider=getattr(self.embedding_client, "provider", "unknown"),
+            provider=self.embedding_provider,
         )
         return Evidence(
             source="repo",

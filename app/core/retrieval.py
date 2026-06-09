@@ -99,6 +99,17 @@ def build_embedding_client() -> Any:
     return HashEmbeddingClient()
 
 
+def resilient_embed_texts(client: Any, texts: list[str]) -> tuple[list[list[float]], str]:
+    try:
+        vectors = client.embed_texts(texts)
+        if not vectors or any(not vector for vector in vectors):
+            raise RuntimeError("Embedding provider returned empty vectors.")
+        return vectors, getattr(client, "provider", "unknown")
+    except Exception:
+        fallback = HashEmbeddingClient()
+        return fallback.embed_texts(texts), fallback.provider
+
+
 @dataclass
 class RetrievalScore:
     lexical: float
