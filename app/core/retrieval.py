@@ -11,6 +11,8 @@ from typing import Any
 from app.core.llm import load_dotenv
 from app.rag.index import tokenize
 
+FAILED_EMBEDDING_PROVIDERS: set[str] = set()
+
 
 def cosine_similarity(left: list[float], right: list[float]) -> float:
     if not left or not right or len(left) != len(right):
@@ -67,6 +69,7 @@ class OpenAICompatibleEmbeddingClient:
             or os.getenv("OPENAI_EMBEDDING_MODEL")
             or ""
         )
+        self.timeout = float(os.getenv("EMBEDDING_TIMEOUT_SECONDS") or "12")
         self.provider = "openai_compatible_embedding"
 
     @property
@@ -86,7 +89,7 @@ class OpenAICompatibleEmbeddingClient:
             },
             method="POST",
         )
-        with urllib.request.urlopen(request, timeout=60) as response:
+        with urllib.request.urlopen(request, timeout=self.timeout) as response:
             payload = json.loads(response.read().decode("utf-8"))
         data = payload.get("data") or []
         return [list(item.get("embedding") or []) for item in data]
@@ -100,12 +103,17 @@ def build_embedding_client() -> Any:
 
 
 def resilient_embed_texts(client: Any, texts: list[str]) -> tuple[list[list[float]], str]:
+    provider = getattr(client, "provider", "unknown")
+    if provider in FAILED_EMBEDDING_PROVIDERS:
+        fallback = HashEmbeddingClient()
+        return fallback.embed_texts(texts), fallback.provider
     try:
         vectors = client.embed_texts(texts)
         if not vectors or any(not vector for vector in vectors):
             raise RuntimeError("Embedding provider returned empty vectors.")
-        return vectors, getattr(client, "provider", "unknown")
+        return vectors, provider
     except Exception:
+        FAILED_EMBEDDING_PROVIDERS.add(provider)
         fallback = HashEmbeddingClient()
         return fallback.embed_texts(texts), fallback.provider
 
