@@ -15,6 +15,7 @@ from typing import Any
 
 from app.core.github_ops import GitHubOps
 from app.core.llm import LLMClient, build_llm
+from app.core.memory_store import MemoryStore
 from app.core.models import Evidence, ResearchTask, TaskStatus
 from app.core.retrieval import RetrievalScore, build_embedding_client, cosine_similarity, resilient_embed_texts
 from app.rag.index import tokenize
@@ -494,6 +495,8 @@ class RepoPilotWorkflow:
         create_pr: bool = False,
         poll_ci: bool = False,
         ci_feedback: bool = False,
+        use_memory: bool = True,
+        save_memory: bool = True,
         pr_number: int | None = None,
         comment_body: str = "",
     ) -> RepoDiagnosisResult:
@@ -501,6 +504,10 @@ class RepoPilotWorkflow:
         task = ResearchTask(query=issue, user_type="software_engineer")
         task.mark(TaskStatus.RUNNING)
         task.add_trace("scenario", "start", scenario="repo_pilot", repo=str(repo))
+        memory_store = MemoryStore(repo / ".repopilot" / "memory.sqlite3")
+        memory_hits = memory_store.search(issue, repo_path=str(repo), top_k=3) if use_memory else []
+        if memory_hits:
+            task.add_trace("memory_store", "recall", hits=len(memory_hits))
 
         chunks = RepoIndexer(repo).build()
         task.add_trace("repo_indexer_agent", "finish", chunks=len(chunks))
@@ -511,8 +518,11 @@ class RepoPilotWorkflow:
 
         suspected_files = self._suspected_files(evidence)
         root_cause = self._root_cause(issue, evidence)
+        if memory_hits:
+            root_cause = root_cause + "\n\n历史相似案例提示:\n" + self._format_memory_hits(memory_hits)
         if self.root_cause_agent:
-            root_cause = self.root_cause_agent.run(issue, evidence)
+            memory_context = "\n\nMemory context:\n" + self._format_memory_hits(memory_hits) if memory_hits else ""
+            root_cause = self.root_cause_agent.run(issue + memory_context, evidence)
             task.add_trace("root_cause_llm_agent", "finish", model="openai_compatible")
         change_plan = self._change_plan(issue, evidence, root_cause)
         if self.patch_planner_agent:
@@ -596,6 +606,7 @@ class RepoPilotWorkflow:
             "brain": "real_llm_multi_agent" if self.use_llm else "rule_based_workflow",
             "sandbox_repair_rounds": max((item.get("repair_round", 1) for item in sandbox_runs), default=0),
             "retrieval_engine": "hybrid_embedding_rerank",
+            "memory_hits": memory_hits,
         }
         task.report = self._report(task, repo, issue)
         self._judge(task)
@@ -623,6 +634,24 @@ class RepoPilotWorkflow:
                 task.evaluation["passed"] = task.evaluation["overall"] >= 0.75
             task.add_trace("repo_judge_llm_agent", "finish", overall=task.evaluation["overall"])
         task.mark(TaskStatus.SUCCEEDED)
+        if save_memory:
+            memory_id = memory_store.save_from_payload(RepoDiagnosisResult(
+                task=task,
+                repo_path=str(repo),
+                issue=issue,
+                suspected_files=suspected_files,
+                change_plan=change_plan,
+                test_plan=test_plan,
+                risk_items=risk_items,
+                patch_suggestions=patch_suggestions,
+                test_runs=test_runs,
+                patch_checks=patch_checks,
+                sandbox_runs=sandbox_runs,
+                worktree_runs=worktree_runs,
+                pr_plan=pr_plan,
+            ).to_dict())
+            task.analysis["saved_memory_id"] = memory_id
+            task.add_trace("memory_store", "save", memory_id=memory_id)
         task.add_trace("scenario", "finish", score=task.evaluation["overall"])
         return RepoDiagnosisResult(
             task=task,
@@ -639,6 +668,20 @@ class RepoPilotWorkflow:
             worktree_runs=worktree_runs,
             pr_plan=pr_plan,
         )
+
+    def _format_memory_hits(self, memory_hits: list[dict[str, Any]]) -> str:
+        if not memory_hits:
+            return ""
+        lines = []
+        for item in memory_hits:
+            payload = item.get("payload", {})
+            lines.append(
+                f"- memory#{item.get('id')} score={item.get('score')} outcome={item.get('outcome')} "
+                f"issue={item.get('issue')[:120]}\n"
+                f"  summary={item.get('summary')[:240]}\n"
+                f"  suspected={', '.join(payload.get('suspected_files', [])[:5])}"
+            )
+        return "\n".join(lines)
 
     def _suspected_files(self, evidence: list[Evidence]) -> list[str]:
         files: list[str] = []
