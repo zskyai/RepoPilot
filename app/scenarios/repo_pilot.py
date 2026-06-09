@@ -19,6 +19,7 @@ from app.core.llm import LLMClient, build_llm
 from app.core.memory_store import MemoryStore
 from app.core.models import Evidence, ResearchTask, TaskStatus
 from app.core.retrieval import RetrievalScore, build_embedding_client, cosine_similarity, resilient_embed_texts
+from app.core.repair_loop import FailureParser, PatchSelector
 from app.core.vector_store import InMemoryVectorStore, VectorStore, build_vector_store
 from app.rag.index import tokenize
 
@@ -416,10 +417,10 @@ class RepoRetriever:
             for chunk in chunks
         ]
         try:
-            self.vector_store.upsert(vector_items, self.chunk_vectors)
+            self.vector_store.upsert(vector_items, self.chunk_vectors, [self._chunk_sparse_text(chunk) for chunk in chunks])
         except Exception as exc:
             self.vector_store = InMemoryVectorStore(fallback_reason=repr(exc))
-            self.vector_store.upsert(vector_items, self.chunk_vectors)
+            self.vector_store.upsert(vector_items, self.chunk_vectors, [self._chunk_sparse_text(chunk) for chunk in chunks])
 
     def search(self, query: str, top_k: int = 8) -> list[Evidence]:
         query_terms = set(tokenize(query))
@@ -429,7 +430,7 @@ class RepoRetriever:
         try:
             vector_hits = {
                 item.key: item.score
-                for item in self.vector_store.search(query_vector, top_k=max(top_k * 6, 24))
+                for item in self.vector_store.search(query_vector, top_k=max(top_k * 6, 24), sparse_text=query)
             }
         except Exception:
             fallback_store = InMemoryVectorStore()
@@ -444,11 +445,12 @@ class RepoRetriever:
                     for chunk in self.chunks
                 ],
                 self.chunk_vectors,
+                [self._chunk_sparse_text(chunk) for chunk in self.chunks],
             )
             self.vector_store = fallback_store
             vector_hits = {
                 item.key: item.score
-                for item in self.vector_store.search(query_vector, top_k=max(top_k * 6, 24))
+                for item in self.vector_store.search(query_vector, top_k=max(top_k * 6, 24), sparse_text=query)
             }
         scored: list[tuple[float, CodeChunk, list[float]]] = []
         for chunk, terms, counter, vector in zip(
@@ -514,6 +516,17 @@ class RepoRetriever:
     def _chunk_key(self, chunk: CodeChunk) -> str:
         return f"{chunk.path}:{chunk.start_line}:{chunk.end_line}"
 
+    def _chunk_sparse_text(self, chunk: CodeChunk) -> str:
+        return "\n".join(
+            [
+                chunk.path,
+                " ".join(chunk.symbols),
+                " ".join(chunk.calls),
+                "\n".join(chunk.graph_context.get("imports", [])),
+                chunk.content,
+            ]
+        )
+
     def _has_graph_relation_hit(self, chunk: CodeChunk, query_terms: set[str]) -> bool:
         candidates = set(tokenize(" ".join(chunk.symbols + chunk.calls)))
         imports = set(tokenize("\n".join(chunk.graph_context.get("imports", []))))
@@ -556,6 +569,8 @@ class RepoPilotWorkflow:
             "You are RepoPilot JudgeAgent, evaluating coding-agent outputs.",
             self.llm,
         ) if self.llm else None
+        self.failure_parser = FailureParser()
+        self.patch_selector = PatchSelector()
         self.allowed_patch_prefixes = (
             "app/",
             "tests/",
@@ -675,6 +690,8 @@ class RepoPilotWorkflow:
             comment_body=comment_body,
         )
         pr_plan["github"] = github_result
+        failure_signals = self._collect_failure_signals(patch_checks, test_runs, sandbox_runs, github_result)
+        selected_patch = self.patch_selector.choose(patch_checks, sandbox_runs)
 
         task.plan = [
             "解析 issue 的错误现象、触发路径和验收标准",
@@ -696,6 +713,8 @@ class RepoPilotWorkflow:
             "sandbox_runs": sandbox_runs,
             "worktree_runs": worktree_runs,
             "second_pass_advice": second_pass,
+            "failure_signals": [item.__dict__ for item in failure_signals],
+            "selected_patch": selected_patch,
             "pr_plan": pr_plan,
             "brain": "real_llm_multi_agent" if self.use_llm else "rule_based_workflow",
             "sandbox_repair_rounds": max((item.get("repair_round", 1) for item in sandbox_runs), default=0),
@@ -1445,6 +1464,18 @@ index 0000000..1111111
             if round_id >= max_rounds:
                 break
             current_issue = self._patch_issue_with_failure_context(current_issue, sandbox_runs, round_id)
+            parsed_failures = []
+            for check in current_checks:
+                if not check.get("passed"):
+                    parsed_failures.extend(self.failure_parser.parse_git_apply(check))
+            for run in sandbox_runs:
+                if not run.get("passed") and run.get("stage") == "sandbox_test":
+                    parsed_failures.extend(self.failure_parser.parse_test_run(run))
+            if parsed_failures:
+                current_issue += "\nStructured failure signals:\n" + "\n".join(
+                    f"- {item.source}:{item.kind} {item.path}:{item.line or ''} {item.message[:300]}"
+                    for item in parsed_failures[:12]
+                )
             if self.patch_suggestion_agent:
                 current_suggestions = self.patch_suggestion_agent.run(current_issue, root_cause, evidence)
             else:
@@ -1467,6 +1498,25 @@ index 0000000..1111111
                 }
             )
         return current_suggestions, current_checks, all_runs
+
+    def _collect_failure_signals(
+        self,
+        patch_checks: list[dict[str, Any]],
+        test_runs: list[dict[str, Any]],
+        sandbox_runs: list[dict[str, Any]],
+        github_result: dict[str, Any],
+    ) -> list[Any]:
+        signals = []
+        for check in patch_checks:
+            if not check.get("passed"):
+                signals.extend(self.failure_parser.parse_git_apply(check))
+        for run in test_runs + sandbox_runs:
+            if not run.get("passed") and run.get("stage") in {None, "sandbox_test"}:
+                signals.extend(self.failure_parser.parse_test_run(run))
+        ci_feedback = github_result.get("ci_feedback") if isinstance(github_result, dict) else None
+        if isinstance(ci_feedback, dict):
+            signals.extend(self.failure_parser.parse_ci_feedback(ci_feedback))
+        return signals[:30]
 
     def _test_commands(self, repo: Path, test_plan: list[str]) -> list[list[str]]:
         commands: list[list[str]] = []
