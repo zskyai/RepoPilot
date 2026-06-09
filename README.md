@@ -1,51 +1,50 @@
 # RepoPilot
 
-真实可运行的 **LLM 多智能体软件研发智能体 / Coding Agent**。  
-输入一个 issue，RepoPilot 会读取真实代码仓库，检索相关代码，生成根因假设、修改计划、patch 建议，执行 patch 校验、测试、sandbox apply，并给出 PR 准备信息。
+RepoPilot is a production-shaped multi-agent coding agent for real repositories.
 
-当前项目已经接入：
+It takes an issue, retrieves the relevant code, reasons about the root cause, proposes and validates patches, applies them in an isolated sandbox, runs tests, collects GitHub CI feedback, and stores durable repair memory for future runs.
 
-- 真实 Qwen / DashScope `qwen-plus`
-- 多智能体工作流
-- StateGraph 架构
-- `git apply --check`
-- sandbox apply
-- `pytest` / smoke check
-- SQLite 运行记录
-- benchmark
+This project is intentionally not a toy chatbot. The useful unit is a repository workflow:
 
-## What It Does
+1. index code with lexical, structural, and embedding retrieval
+2. localize files, symbols, and likely call paths
+3. use a real OpenAI-compatible LLM as the reasoning engine
+4. generate structured root-cause analysis and patch plans
+5. validate unified diffs with `git apply --check`
+6. apply candidate patches in a sandbox copy
+7. run `pytest` / smoke checks
+8. loop on repair feedback when validation fails
+9. create or update GitHub PRs
+10. poll CI checks and write PR comments
+11. save long-term repair memory in SQLite
 
-RepoPilot 不是简单问答机器人，而是一个围绕代码仓库工作的 Agent 系统：
+## Current Capabilities
 
-1. 读取仓库并建立轻量代码索引
-2. 检索 issue 相关文件、符号和调用
-3. 使用真实 LLM 生成根因分析和修改计划
-4. 生成 unified diff 风格 patch 建议
-5. 执行 `git apply --check`
-6. 在隔离副本中真正 `git apply`
-7. 运行 `pytest` 和 smoke check
-8. 保存运行记录到 SQLite
-9. 生成 PR readiness 信息
+- Multi-agent workflow with a LangGraph-compatible state graph
+- Real LLM integration through DashScope/Qwen or any OpenAI-compatible endpoint
+- Hybrid retrieval: keyword, AST/symbol signals, call hints, embeddings, and rerank scoring
+- Sandbox patch apply and test execution
+- Worktree patch apply with guardrails
+- GitHub PR, CI, and PR comment integration
+- CI feedback collection for repair context
+- Long-term repository memory in `.repopilot/memory.sqlite3`
+- Benchmark runner with stable multi-case evaluation
+- FastAPI dashboard for interactive runs
 
 ## Quick Start
 
-### 1. Environment
-
-推荐 Python `>=3.11`。
-
-安装：
+### 1. Install
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -e .[dev]
 ```
 
-### 2. Configure Model
+### 2. Configure
 
-复制 `.env.example` 为 `.env`。
+Copy `.env.example` to `.env`.
 
-当前项目兼容你的 DashScope / Qwen 配置：
+For DashScope/Qwen:
 
 ```env
 DASHSCOPE_API_KEY=your-key
@@ -53,14 +52,15 @@ QWEN_MODEL=qwen-plus
 QWEN_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 ```
 
-可选 embedding 配置：
+Optional embedding configuration:
+
 ```env
 EMBEDDING_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 EMBEDDING_API_KEY=your-key
 EMBEDDING_MODEL=text-embedding-v4
 ```
 
-也兼容通用 OpenAI-compatible 变量：
+Generic OpenAI-compatible providers are also supported:
 
 ```env
 LLM_BASE_URL=https://api.example.com/v1
@@ -68,216 +68,122 @@ LLM_API_KEY=your-key
 LLM_MODEL=gpt-4o-mini
 ```
 
-### 3. Run RepoPilot
+For GitHub integration:
 
-推荐直接运行状态图版本：
-
-```powershell
-.\.venv\Scripts\python.exe run_repo_pilot.py --repo . --issue "API 返回 JSON schema 字段不稳定，需要定位接口和模型定义" --run-tests --apply-sandbox --save-run --use-llm --require-llm --graph
+```env
+GITHUB_TOKEN=github_pat_or_classic_token
 ```
 
-如果你希望在 sandbox 验证通过后，把 patch 真正落到原仓库：
+The token needs repository access for PR creation, reading checks, and writing comments.
+
+### 3. Run The Agent
+
+Use the graph workflow for the production path:
 
 ```powershell
-.\.venv\Scripts\python.exe run_repo_pilot.py --repo . --issue "运行 API 服务时出现 No module named app，怀疑是启动目录或包路径配置问题。" --run-tests --apply-sandbox --apply-worktree --save-run --use-llm --require-llm --graph
+.\.venv\Scripts\python.exe run_repo_pilot.py --repo . --issue "API returns an unstable JSON schema; locate the endpoint and model definitions." --run-tests --apply-sandbox --save-run --use-llm --require-llm --graph
 ```
 
-如果 `gh auth status` 正常，或者已经配置 `GITHUB_TOKEN` 且仓库存在 `origin` 指向 GitHub，可直接创建 PR、拉取 CI 和回写评论：
+To allow a validated patch to be applied back to the working tree:
 
 ```powershell
-.\.venv\Scripts\python.exe run_repo_pilot.py --repo . --issue "..." --run-tests --apply-sandbox --apply-worktree --create-pr --poll-ci --pr-number 123 --comment-body "RepoPilot validation passed." --save-run --use-llm --require-llm --graph
+.\.venv\Scripts\python.exe run_repo_pilot.py --repo . --issue "Fix a failing package import when the API server starts." --run-tests --apply-sandbox --apply-worktree --save-run --use-llm --require-llm --graph
 ```
 
-或者直接使用脚本：
+To create a PR, poll CI, and comment back to GitHub:
 
 ```powershell
-.\scripts_run_repo_pilot.ps1
+.\.venv\Scripts\python.exe run_repo_pilot.py --repo . --issue "GitHub integration smoke" --run-tests --apply-sandbox --apply-worktree --create-pr --poll-ci --comment-body "RepoPilot validation passed." --save-run --use-llm --require-llm --graph
 ```
 
-### 4. API Service
+## Long-Term Memory
 
-```powershell
-.\scripts_start_api.ps1
-```
-
-接口：
-
-- `GET /health`
-- `POST /repo-pilot/diagnose`
-- `GET /repo-pilot/ui`
-
-Dashboard：
+RepoPilot saves compact repair memories in:
 
 ```text
-http://127.0.0.1:8000/repo-pilot/ui
+.repopilot/memory.sqlite3
 ```
 
-## Example Output
+Each memory stores the issue, root-cause summary, suspected files, patch evidence, evaluation result, GitHub/CI feedback, and an embedding for semantic recall.
 
-运行后会得到：
+Memory is enabled by default:
 
-- 根因假设
-- 疑似文件
-- 修改计划
-- patch 建议
-- patch 校验结果
-- 测试执行结果
-- sandbox apply 结果
-- worktree apply 结果
-- 二次修复建议
-- PR readiness
-- 规则评分 + LLM Judge
-
-## Architecture
-
-### Multi-Agent
-
-- `RepoIndexer` Tool Agent
-- `CodeRetriever` Tool Agent
-- `HybridEmbeddingRetriever` Tool Agent
-- `RootCauseAgent` (LLM)
-- `PatchPlannerAgent` (LLM)
-- `PatchSuggestionAgent` (LLM)
-- `TestRunner` Tool Agent
-- `RepairAdvisorAgent` (LLM)
-- `RepoJudgeAgent` (LLM + Rubric)
-
-### StateGraph
-
-```mermaid
-flowchart LR
-    Plan["plan"] --> Act["act"]
-    Act --> Verify["verify"]
-    Verify -->|pass| Judge["judge"]
-    Verify -->|fail| Repair["repair"]
-    Repair --> Act
-    Judge --> PR["pr_ready"]
+```powershell
+.\.venv\Scripts\python.exe run_repo_pilot.py --repo . --issue "..." --use-llm --graph
 ```
 
-设计范式：
+Disable recall or saving when needed:
+
+```powershell
+.\.venv\Scripts\python.exe run_repo_pilot.py --repo . --issue "..." --no-memory
+.\.venv\Scripts\python.exe run_repo_pilot.py --repo . --issue "..." --no-save-memory
+```
+
+## API / Dashboard
+
+Start the local dashboard:
+
+```powershell
+.\.venv\Scripts\python.exe -m uvicorn app.api.server:app --reload --port 8000
+```
+
+Open:
 
 ```text
-Plan -> Act -> Verify -> Repair -> Judge -> PR Ready
+http://127.0.0.1:8000
 ```
 
-当前优先使用 **官方 LangGraph**；只有在 LangGraph 不可用时，才回退到本地轻量 StateGraph runtime。
+The dashboard exposes run options for LLM, sandbox apply, tests, GitHub PR/CI, and memory.
 
 ## Benchmark
-
-运行 benchmark：
 
 ```powershell
 .\.venv\Scripts\python.exe run_benchmark.py --use-llm --require-llm --run-tests --apply-sandbox --save-run
 ```
 
-对比 rule-based baseline 和 LLM 模式：
+Baseline comparison:
 
 ```powershell
 .\.venv\Scripts\python.exe run_benchmark.py --use-llm --require-llm --run-tests --apply-sandbox --compare-baseline
 ```
 
-当前 benchmark 案例文件：
+## Architecture
 
-```text
-benchmarks/repo_pilot_cases.json
+```mermaid
+flowchart LR
+    A["Issue"] --> B["Hybrid Retrieval"]
+    B --> C["Root Cause Agent"]
+    C --> D["Patch Planner"]
+    D --> E["Patch Agent"]
+    E --> F["git apply --check"]
+    F --> G["Sandbox Apply"]
+    G --> H["Tests / Smoke"]
+    H --> I["Repair Loop"]
+    I --> E
+    H --> J["Judge / PR Readiness"]
+    J --> K["GitHub PR / CI / Comments"]
+    J --> L["Long-Term Memory"]
+    L --> C
 ```
 
-当前结果示例：
+See:
 
-```json
-{
-  "case_count": 8,
-  "pass_rate": 0.75,
-  "average_overall": 0.86
-}
-```
+- `docs/architecture.md`
+- `docs/benchmark.md`
+- `docs/github_integration.md`
+- `docs/memory.md`
 
-这个 benchmark 是“真跑”的，不是静态填表：失败 case 会真实保留下来。当前 runner 会逐 case 打印进度和耗时，长跑时也能看到活性。
+## What Makes It Different From Direct LLM Calls
 
-## Persistence
+A direct LLM call answers from prompt context only. RepoPilot adds tool-grounded execution:
 
-运行记录会保存到：
+- repository indexing and retrieval before generation
+- structured multi-agent roles instead of one free-form prompt
+- patch validation with Git tooling
+- isolated sandbox apply
+- real test execution
+- CI feedback recovery
+- durable memory across runs
+- PR-ready evidence and comments
 
-```text
-.repopilot/runs.sqlite3
-```
-
-patch 文件会保存到：
-
-```text
-.repopilot/patches/
-```
-
-sandbox 副本位置：
-
-```text
-.repopilot/sandbox/
-```
-
-## Dashboard
-
-当前项目已经内置一个轻量 dashboard：
-
-- repo 路径输入
-- issue 输入
-- graph / llm / sandbox / worktree / save-run 开关
-- summary 面板
-- graph trace 面板
-- full JSON 面板
-
-它不花哨，但足够用于演示、调试和 GitHub 截图。
-
-## Open Source Case
-
-项目已经在真实开源仓库 `python-slugify` 上做过验证，并完成过低风险优化案例。相关说明见：
-
-- [repo_pilot_open_source_case.md](C:/Users/HP/Documents/Codex/2026-06-08/files-mentioned-by-the-user-2/outputs/repo_pilot_open_source_case.md)
-
-## Project Layout
-
-```text
-app/
-  api/
-  core/
-  eval/
-  scenarios/
-benchmarks/
-docs/
-run_repo_pilot.py
-run_benchmark.py
-```
-
-## Limitations
-
-当前版本仍有这些限制：
-
-- patch 仍以建议和 sandbox apply 为主，没有直接改动原仓库
-- worktree apply 默认关闭，只有显式启用后才会尝试改动原仓库
-- worktree apply 只允许改动 allowlist 内文件，并会在落地前创建备份、在 git 仓库中阻止脏工作区直接写入
-- auto re-apply 已经会基于 sandbox 失败日志生成下一轮 patch，但仍然没有做语义级 merge / conflict resolution
-- 检索还没有接 embedding / vector DB / rerank
-- dashboard 仍然比较轻量
-- `gh` 未登录时不会自动创建 PR
-
-## Why This Is Better Than a Simple LLM Call
-
-直接调用大模型只能生成建议；RepoPilot 会：
-
-- 读取真实仓库
-- 检索真实代码（hybrid lexical + embedding + rerank）
-- 执行真实测试
-- 检查 patch 是否可应用
-- 在 sandbox 中验证
-- 能接 GitHub PR / CI / comment
-- 保存结果
-- 做 benchmark
-
-它更接近真正的 Coding Agent，而不是 Chatbot。
-
-## Roadmap
-
-1. 加 embedding + vector retrieval + rerank
-2. 做 patch conflict resolution 和语义级 merge
-3. 增强 dashboard 历史 run 对比能力
-4. GitHub PR 自动创建与评论回写
-5. 接入更强 benchmark 数据集
+That means the agent can be evaluated by code facts, not only by fluent explanations.
