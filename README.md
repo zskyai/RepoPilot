@@ -22,12 +22,14 @@ This project is intentionally not a toy chatbot. The useful unit is a repository
 
 - Multi-agent workflow with a LangGraph-compatible state graph
 - Real LLM integration through DashScope/Qwen or any OpenAI-compatible endpoint
-- Hybrid retrieval: keyword, AST/symbol signals, call hints, embeddings, and rerank scoring
+- Tree-sitter code knowledge graph for Python, JavaScript, TypeScript, and TSX
+- Qdrant-backed hybrid retrieval: lexical, dense vector, symbol/call/import, and rerank scoring
 - Sandbox patch apply and test execution
 - Worktree patch apply with guardrails
 - GitHub PR, CI, and PR comment integration
 - CI feedback collection for repair context
 - Long-term repository memory in `.repopilot/memory.sqlite3`
+- Persistent graph traces in `.repopilot/traces.sqlite3`
 - Benchmark runner with stable multi-case evaluation
 - FastAPI dashboard for interactive runs
 
@@ -152,6 +154,8 @@ Baseline comparison:
 ```mermaid
 flowchart LR
     A["Issue"] --> B["Hybrid Retrieval"]
+    M["Tree-sitter Code Graph"] --> B
+    Q["Qdrant Vector Store"] --> B
     B --> C["Root Cause Agent"]
     C --> D["Patch Planner"]
     D --> E["Patch Agent"]
@@ -164,6 +168,7 @@ flowchart LR
     J --> K["GitHub PR / CI / Comments"]
     J --> L["Long-Term Memory"]
     L --> C
+    J --> T["Persistent Trace Store"]
 ```
 
 See:

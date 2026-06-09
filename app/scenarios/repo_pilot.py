@@ -13,11 +13,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from app.core.code_graph import CodeGraph, TreeSitterCodeGraphBuilder
 from app.core.github_ops import GitHubOps
 from app.core.llm import LLMClient, build_llm
 from app.core.memory_store import MemoryStore
 from app.core.models import Evidence, ResearchTask, TaskStatus
 from app.core.retrieval import RetrievalScore, build_embedding_client, cosine_similarity, resilient_embed_texts
+from app.core.vector_store import InMemoryVectorStore, VectorStore, build_vector_store
 from app.rag.index import tokenize
 
 
@@ -58,6 +60,7 @@ class CodeChunk:
     content: str
     symbols: list[str] = field(default_factory=list)
     calls: list[str] = field(default_factory=list)
+    graph_context: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -268,15 +271,20 @@ class RepoIndexer:
     def __init__(self, repo_path: str | Path, max_file_kb: int = 256) -> None:
         self.repo_path = Path(repo_path).resolve()
         self.max_file_kb = max_file_kb
+        self.code_graph = CodeGraph(parser_backend="not_built")
 
     def build(self) -> list[CodeChunk]:
-        chunks: list[CodeChunk] = []
+        file_texts: list[tuple[str, str]] = []
         for path in self._iter_files():
             rel = path.relative_to(self.repo_path).as_posix()
             try:
                 text = path.read_text(encoding="utf-8")
             except UnicodeDecodeError:
                 continue
+            file_texts.append((rel, text))
+        self.code_graph = TreeSitterCodeGraphBuilder(self.repo_path).build_for_files(file_texts)
+        chunks: list[CodeChunk] = []
+        for rel, text in file_texts:
             chunks.extend(self._chunk_file(rel, text))
         return chunks
 
@@ -306,8 +314,19 @@ class RepoIndexer:
                     start_line=start + 1,
                     end_line=start + len(piece),
                     content="\n".join(piece),
-                    symbols=self._symbols(rel, "\n".join(piece)),
-                    calls=self._calls(rel, "\n".join(piece)),
+                    symbols=list(
+                        dict.fromkeys(
+                            self.code_graph.symbols_for_chunk(rel, start + 1, start + len(piece))
+                            + self._symbols(rel, "\n".join(piece))
+                        )
+                    )[:20],
+                    calls=list(
+                        dict.fromkeys(
+                            self.code_graph.calls_for_chunk(rel, start + 1, start + len(piece))
+                            + self._calls(rel, "\n".join(piece))
+                        )
+                    )[:40],
+                    graph_context=self.code_graph.file_context(rel),
                 )
             )
             if start + window >= len(lines):
@@ -345,8 +364,10 @@ class RepoIndexer:
 
 
 class RepoRetriever:
-    def __init__(self, chunks: list[CodeChunk]) -> None:
+    def __init__(self, chunks: list[CodeChunk], repo_path: str | Path, code_graph: CodeGraph) -> None:
         self.chunks = chunks
+        self.repo_path = Path(repo_path).resolve()
+        self.code_graph = code_graph
         self.embedding_client = build_embedding_client()
         self.embedding_provider = getattr(self.embedding_client, "provider", "unknown")
         self.chunk_terms = [
@@ -377,12 +398,58 @@ class RepoRetriever:
                 for chunk in chunks
             ],
         )
+        self.vector_store: VectorStore = build_vector_store(
+            repo_path=self.repo_path,
+            vector_size=len(self.chunk_vectors[0]) if self.chunk_vectors else 1,
+            chunk_count=len(chunks),
+        )
+        vector_items = [
+            {
+                "key": self._chunk_key(chunk),
+                "path": chunk.path,
+                "start_line": chunk.start_line,
+                "end_line": chunk.end_line,
+                "symbols": chunk.symbols,
+                "calls": chunk.calls,
+                "language": chunk.graph_context.get("language", ""),
+            }
+            for chunk in chunks
+        ]
+        try:
+            self.vector_store.upsert(vector_items, self.chunk_vectors)
+        except Exception as exc:
+            self.vector_store = InMemoryVectorStore(fallback_reason=repr(exc))
+            self.vector_store.upsert(vector_items, self.chunk_vectors)
 
     def search(self, query: str, top_k: int = 8) -> list[Evidence]:
         query_terms = set(tokenize(query))
         query_counter = Counter(tokenize(query))
         query_vector, _query_provider = resilient_embed_texts(self.embedding_client, [query])
         query_vector = query_vector[0]
+        try:
+            vector_hits = {
+                item.key: item.score
+                for item in self.vector_store.search(query_vector, top_k=max(top_k * 6, 24))
+            }
+        except Exception:
+            fallback_store = InMemoryVectorStore()
+            fallback_store.upsert(
+                [
+                    {
+                        "key": self._chunk_key(chunk),
+                        "path": chunk.path,
+                        "start_line": chunk.start_line,
+                        "end_line": chunk.end_line,
+                    }
+                    for chunk in self.chunks
+                ],
+                self.chunk_vectors,
+            )
+            self.vector_store = fallback_store
+            vector_hits = {
+                item.key: item.score
+                for item in self.vector_store.search(query_vector, top_k=max(top_k * 6, 24))
+            }
         scored: list[tuple[float, CodeChunk, list[float]]] = []
         for chunk, terms, counter, vector in zip(
             self.chunks,
@@ -392,15 +459,20 @@ class RepoRetriever:
         ):
             overlap = len(query_terms & terms)
             lexical = overlap / max(1, len(query_terms))
-            semantic = cosine_similarity(query_vector, vector)
+            local_semantic = cosine_similarity(query_vector, vector)
+            semantic = max(local_semantic, vector_hits.get(self._chunk_key(chunk), 0.0))
             if overlap == 0 and semantic < 0.1:
                 continue
             path_bonus = 0.5 if any(term in chunk.path.lower() for term in query_terms) else 0
             symbol_bonus = 0.2 * len(set(tokenize(" ".join(chunk.symbols))) & query_terms)
             call_bonus = 0.1 * len(set(tokenize(" ".join(chunk.calls))) & query_terms)
+            import_bonus = 0.1 * len(
+                set(tokenize("\n".join(chunk.graph_context.get("imports", [])))) & query_terms
+            )
+            graph_bonus = 0.15 if self._has_graph_relation_hit(chunk, query_terms) else 0.0
             idf_bonus = sum(1.0 / max(1, counter.get(term, 0)) for term in query_counter if term in counter)
-            structural = path_bonus + symbol_bonus + call_bonus + min(0.5, 0.05 * idf_bonus)
-            score = lexical * 0.45 + semantic * 0.4 + structural * 0.15
+            structural = path_bonus + symbol_bonus + call_bonus + import_bonus + graph_bonus + min(0.5, 0.05 * idf_bonus)
+            score = lexical * 0.35 + semantic * 0.4 + structural * 0.25
             scored.append((score, chunk, vector))
         scored.sort(key=lambda item: item[0], reverse=True)
         top_scores = scored[:top_k]
@@ -431,9 +503,21 @@ class RepoRetriever:
                 "end_line": chunk.end_line,
                 "symbols": chunk.symbols,
                 "calls": chunk.calls,
+                "graph_context": chunk.graph_context,
                 "retrieval": retrieval.__dict__,
+                "vector_backend": self.vector_store.backend,
+                "vector_backend_reason": getattr(self.vector_store, "fallback_reason", ""),
+                "code_graph_backend": self.code_graph.parser_backend,
             },
         )
+
+    def _chunk_key(self, chunk: CodeChunk) -> str:
+        return f"{chunk.path}:{chunk.start_line}:{chunk.end_line}"
+
+    def _has_graph_relation_hit(self, chunk: CodeChunk, query_terms: set[str]) -> bool:
+        candidates = set(tokenize(" ".join(chunk.symbols + chunk.calls)))
+        imports = set(tokenize("\n".join(chunk.graph_context.get("imports", []))))
+        return bool((candidates | imports) & query_terms)
 
 
 class RepoPilotWorkflow:
@@ -509,12 +593,22 @@ class RepoPilotWorkflow:
         if memory_hits:
             task.add_trace("memory_store", "recall", hits=len(memory_hits))
 
-        chunks = RepoIndexer(repo).build()
+        indexer = RepoIndexer(repo)
+        chunks = indexer.build()
+        code_graph = indexer.code_graph
         task.add_trace("repo_indexer_agent", "finish", chunks=len(chunks))
+        task.add_trace("code_graph_agent", "finish", **code_graph.summary())
 
-        evidence = RepoRetriever(chunks).search(issue, top_k=8)
+        retriever = RepoRetriever(chunks, repo_path=repo, code_graph=code_graph)
+        evidence = retriever.search(issue, top_k=8)
         task.evidence = evidence
-        task.add_trace("code_retriever_agent", "finish", evidence_count=len(evidence))
+        task.add_trace(
+            "code_retriever_agent",
+            "finish",
+            evidence_count=len(evidence),
+            vector_backend=retriever.vector_store.backend,
+            embedding_provider=retriever.embedding_provider,
+        )
 
         suspected_files = self._suspected_files(evidence)
         root_cause = self._root_cause(issue, evidence)
@@ -605,7 +699,10 @@ class RepoPilotWorkflow:
             "pr_plan": pr_plan,
             "brain": "real_llm_multi_agent" if self.use_llm else "rule_based_workflow",
             "sandbox_repair_rounds": max((item.get("repair_round", 1) for item in sandbox_runs), default=0),
-            "retrieval_engine": "hybrid_embedding_rerank",
+            "retrieval_engine": "qdrant_hybrid_tree_sitter_rerank",
+            "code_graph": code_graph.summary(),
+            "vector_backend": retriever.vector_store.backend,
+            "embedding_provider": retriever.embedding_provider,
             "memory_hits": memory_hits,
         }
         task.report = self._report(task, repo, issue)
