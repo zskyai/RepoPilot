@@ -1,0 +1,9 @@
+[
+  {
+    "instance_id": "repopilot_self_retrieval_smoke",
+    "repo": ".",
+    "issue": "Locate RepoPilot retrieval and graph workflow code paths and verify the advanced retrieval architecture.",
+    "test_command": "python -m pytest -q",
+    "setup_commands": []
+  }
+]
