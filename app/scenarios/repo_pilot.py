@@ -493,6 +493,7 @@ class RepoPilotWorkflow:
         apply_worktree: bool = False,
         create_pr: bool = False,
         poll_ci: bool = False,
+        ci_feedback: bool = False,
         pr_number: int | None = None,
         comment_body: str = "",
     ) -> RepoDiagnosisResult:
@@ -565,6 +566,7 @@ class RepoPilotWorkflow:
             pr_plan=pr_plan,
             create_pr=create_pr,
             poll_ci=poll_ci,
+            ci_feedback=ci_feedback,
             pr_number=pr_number,
             comment_body=comment_body,
         )
@@ -1415,6 +1417,7 @@ index 0000000..1111111
         pr_plan: dict[str, Any],
         create_pr: bool,
         poll_ci: bool,
+        ci_feedback: bool,
         pr_number: int | None,
         comment_body: str,
     ) -> dict[str, Any]:
@@ -1438,6 +1441,8 @@ index 0000000..1111111
                 active_pr = int(payload["create_pr"].get("number") or 0) or active_pr
         if poll_ci and active_pr:
             payload["ci_checks"] = ops.pr_checks(active_pr)
+        if ci_feedback and active_pr:
+            payload["ci_feedback"] = ops.ci_feedback(active_pr)
         if comment_body and active_pr:
             payload["comment"] = ops.comment_on_pr(active_pr, comment_body)
         payload["active_pr_number"] = active_pr

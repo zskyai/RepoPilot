@@ -30,6 +30,7 @@ def main() -> None:
     )
     parser.add_argument("--create-pr", action="store_true", help="Create a GitHub pull request with gh CLI.")
     parser.add_argument("--poll-ci", action="store_true", help="Fetch CI checks for the active PR with gh CLI.")
+    parser.add_argument("--ci-feedback", action="store_true", help="Fetch structured CI failure feedback for repair loops.")
     parser.add_argument("--pr-number", type=int, default=None, help="Existing PR number for CI polling or commenting.")
     parser.add_argument("--comment-body", default="", help="Write a comment back to the PR with gh CLI.")
     parser.add_argument("--save-run", action="store_true", help="Persist run payload to .repopilot/runs.sqlite3.")
@@ -44,6 +45,7 @@ def main() -> None:
         apply_worktree=args.apply_worktree,
         create_pr=args.create_pr,
         poll_ci=args.poll_ci,
+        ci_feedback=args.ci_feedback,
         pr_number=args.pr_number,
         comment_body=args.comment_body,
     )

@@ -45,6 +45,7 @@ class RepoPilotGraphWorkflow:
         apply_worktree: bool = False,
         create_pr: bool = False,
         poll_ci: bool = False,
+        ci_feedback: bool = False,
         pr_number: int | None = None,
         comment_body: str = "",
     ) -> RepoDiagnosisResult:
@@ -57,6 +58,7 @@ class RepoPilotGraphWorkflow:
                 "apply_worktree": apply_worktree,
                 "create_pr": create_pr,
                 "poll_ci": poll_ci,
+                "ci_feedback": ci_feedback,
                 "pr_number": pr_number,
                 "comment_body": comment_body,
                 "repair_round": 0,
@@ -130,6 +132,7 @@ class RepoPilotGraphWorkflow:
             apply_worktree=payload.get("apply_worktree", False),
             create_pr=payload.get("create_pr", False),
             poll_ci=payload.get("poll_ci", False),
+            ci_feedback=payload.get("ci_feedback", False),
             pr_number=payload.get("pr_number"),
             comment_body=payload.get("comment_body", ""),
         )

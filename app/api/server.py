@@ -37,6 +37,7 @@ class RepoPilotRequest(BaseModel):
     apply_worktree: bool = False
     create_pr: bool = False
     poll_ci: bool = False
+    ci_feedback: bool = False
     pr_number: int | None = None
     comment_body: str = ""
     save_run: bool = False
@@ -86,6 +87,7 @@ if FastAPI:
         <label><input type="checkbox" id="apply_worktree" /> apply worktree</label>
         <label><input type="checkbox" id="create_pr" /> create pr</label>
         <label><input type="checkbox" id="poll_ci" /> poll ci</label>
+        <label><input type="checkbox" id="ci_feedback" /> ci feedback</label>
         <label><input type="checkbox" id="save_run" checked /> save run</label>
       </div>
       <label>PR Number</label>
@@ -113,6 +115,7 @@ if FastAPI:
         apply_worktree: document.getElementById('apply_worktree').checked,
         create_pr: document.getElementById('create_pr').checked,
         poll_ci: document.getElementById('poll_ci').checked,
+        ci_feedback: document.getElementById('ci_feedback').checked,
         pr_number: document.getElementById('pr_number').value ? Number(document.getElementById('pr_number').value) : null,
         comment_body: document.getElementById('comment_body').value,
         save_run: document.getElementById('save_run').checked
@@ -160,6 +163,7 @@ if FastAPI:
             apply_worktree=req.apply_worktree,
             create_pr=req.create_pr,
             poll_ci=req.poll_ci,
+            ci_feedback=req.ci_feedback,
             pr_number=req.pr_number,
             comment_body=req.comment_body,
         )
