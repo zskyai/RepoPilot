@@ -37,8 +37,12 @@ class RepoPilotRequest(BaseModel):
     apply_worktree: bool = False
     create_pr: bool = False
     poll_ci: bool = False
+    ci_feedback: bool = False
+    use_memory: bool = True
+    save_memory: bool = True
     pr_number: int | None = None
     comment_body: str = ""
+    require_approval: bool = True
     save_run: bool = False
 
 
@@ -86,6 +90,10 @@ if FastAPI:
         <label><input type="checkbox" id="apply_worktree" /> apply worktree</label>
         <label><input type="checkbox" id="create_pr" /> create pr</label>
         <label><input type="checkbox" id="poll_ci" /> poll ci</label>
+        <label><input type="checkbox" id="ci_feedback" /> ci feedback</label>
+        <label><input type="checkbox" id="use_memory" checked /> memory</label>
+        <label><input type="checkbox" id="save_memory" checked /> save memory</label>
+        <label><input type="checkbox" id="require_approval" checked /> approval gate</label>
         <label><input type="checkbox" id="save_run" checked /> save run</label>
       </div>
       <label>PR Number</label>
@@ -113,8 +121,12 @@ if FastAPI:
         apply_worktree: document.getElementById('apply_worktree').checked,
         create_pr: document.getElementById('create_pr').checked,
         poll_ci: document.getElementById('poll_ci').checked,
+        ci_feedback: document.getElementById('ci_feedback').checked,
+        use_memory: document.getElementById('use_memory').checked,
+        save_memory: document.getElementById('save_memory').checked,
         pr_number: document.getElementById('pr_number').value ? Number(document.getElementById('pr_number').value) : null,
         comment_body: document.getElementById('comment_body').value,
+        require_approval: document.getElementById('require_approval').checked,
         save_run: document.getElementById('save_run').checked
       };
       const res = await fetch('/repo-pilot/diagnose', {
@@ -135,6 +147,9 @@ if FastAPI:
         sandbox_repair_rounds: data.analysis?.sandbox_repair_rounds,
         worktree_apply: data.analysis?.worktree_runs,
         github: data.pr_plan?.github,
+        memory_hits: data.analysis?.memory_hits,
+        saved_memory_id: data.analysis?.saved_memory_id,
+        approval_gate: data.analysis?.approval_gate,
         pr_ready: data.pr_plan?.ready
       }, null, 2);
       document.getElementById('trace').textContent = JSON.stringify(data.analysis?.graph_trace || data.trace || [], null, 2);
@@ -152,16 +167,24 @@ if FastAPI:
     @app.post("/repo-pilot/diagnose")
     def repo_pilot(req: RepoPilotRequest) -> dict:
         workflow_cls = RepoPilotGraphWorkflow if req.graph else RepoPilotWorkflow
-        result = workflow_cls(use_llm=req.use_llm, require_llm=req.require_llm).run(
-            req.repo,
-            req.issue,
+        run_kwargs = dict(
             run_tests=req.run_tests,
             apply_sandbox=req.apply_sandbox,
             apply_worktree=req.apply_worktree,
             create_pr=req.create_pr,
             poll_ci=req.poll_ci,
+            ci_feedback=req.ci_feedback,
+            use_memory=req.use_memory,
+            save_memory=req.save_memory,
             pr_number=req.pr_number,
             comment_body=req.comment_body,
+        )
+        if req.graph:
+            run_kwargs["require_approval"] = req.require_approval
+        result = workflow_cls(use_llm=req.use_llm, require_llm=req.require_llm).run(
+            req.repo,
+            req.issue,
+            **run_kwargs,
         )
         payload = result.to_dict()
         if req.save_run:
