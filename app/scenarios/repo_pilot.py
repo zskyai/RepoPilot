@@ -13,10 +13,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from app.core.code_graph import CodeGraph, TreeSitterCodeGraphBuilder
 from app.core.github_ops import GitHubOps
 from app.core.llm import LLMClient, build_llm
+from app.core.memory_store import MemoryStore
 from app.core.models import Evidence, ResearchTask, TaskStatus
 from app.core.retrieval import RetrievalScore, build_embedding_client, cosine_similarity, resilient_embed_texts
+from app.core.repair_loop import FailureParser, PatchSelector
+from app.core.vector_store import InMemoryVectorStore, VectorStore, build_vector_store
 from app.rag.index import tokenize
 
 
@@ -57,6 +61,7 @@ class CodeChunk:
     content: str
     symbols: list[str] = field(default_factory=list)
     calls: list[str] = field(default_factory=list)
+    graph_context: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -267,15 +272,20 @@ class RepoIndexer:
     def __init__(self, repo_path: str | Path, max_file_kb: int = 256) -> None:
         self.repo_path = Path(repo_path).resolve()
         self.max_file_kb = max_file_kb
+        self.code_graph = CodeGraph(parser_backend="not_built")
 
     def build(self) -> list[CodeChunk]:
-        chunks: list[CodeChunk] = []
+        file_texts: list[tuple[str, str]] = []
         for path in self._iter_files():
             rel = path.relative_to(self.repo_path).as_posix()
             try:
                 text = path.read_text(encoding="utf-8")
             except UnicodeDecodeError:
                 continue
+            file_texts.append((rel, text))
+        self.code_graph = TreeSitterCodeGraphBuilder(self.repo_path).build_for_files(file_texts)
+        chunks: list[CodeChunk] = []
+        for rel, text in file_texts:
             chunks.extend(self._chunk_file(rel, text))
         return chunks
 
@@ -305,8 +315,19 @@ class RepoIndexer:
                     start_line=start + 1,
                     end_line=start + len(piece),
                     content="\n".join(piece),
-                    symbols=self._symbols(rel, "\n".join(piece)),
-                    calls=self._calls(rel, "\n".join(piece)),
+                    symbols=list(
+                        dict.fromkeys(
+                            self.code_graph.symbols_for_chunk(rel, start + 1, start + len(piece))
+                            + self._symbols(rel, "\n".join(piece))
+                        )
+                    )[:20],
+                    calls=list(
+                        dict.fromkeys(
+                            self.code_graph.calls_for_chunk(rel, start + 1, start + len(piece))
+                            + self._calls(rel, "\n".join(piece))
+                        )
+                    )[:40],
+                    graph_context=self.code_graph.file_context(rel),
                 )
             )
             if start + window >= len(lines):
@@ -344,8 +365,10 @@ class RepoIndexer:
 
 
 class RepoRetriever:
-    def __init__(self, chunks: list[CodeChunk]) -> None:
+    def __init__(self, chunks: list[CodeChunk], repo_path: str | Path, code_graph: CodeGraph) -> None:
         self.chunks = chunks
+        self.repo_path = Path(repo_path).resolve()
+        self.code_graph = code_graph
         self.embedding_client = build_embedding_client()
         self.embedding_provider = getattr(self.embedding_client, "provider", "unknown")
         self.chunk_terms = [
@@ -376,12 +399,59 @@ class RepoRetriever:
                 for chunk in chunks
             ],
         )
+        self.vector_store: VectorStore = build_vector_store(
+            repo_path=self.repo_path,
+            vector_size=len(self.chunk_vectors[0]) if self.chunk_vectors else 1,
+            chunk_count=len(chunks),
+        )
+        vector_items = [
+            {
+                "key": self._chunk_key(chunk),
+                "path": chunk.path,
+                "start_line": chunk.start_line,
+                "end_line": chunk.end_line,
+                "symbols": chunk.symbols,
+                "calls": chunk.calls,
+                "language": chunk.graph_context.get("language", ""),
+            }
+            for chunk in chunks
+        ]
+        try:
+            self.vector_store.upsert(vector_items, self.chunk_vectors, [self._chunk_sparse_text(chunk) for chunk in chunks])
+        except Exception as exc:
+            self.vector_store = InMemoryVectorStore(fallback_reason=repr(exc))
+            self.vector_store.upsert(vector_items, self.chunk_vectors, [self._chunk_sparse_text(chunk) for chunk in chunks])
 
     def search(self, query: str, top_k: int = 8) -> list[Evidence]:
         query_terms = set(tokenize(query))
         query_counter = Counter(tokenize(query))
         query_vector, _query_provider = resilient_embed_texts(self.embedding_client, [query])
         query_vector = query_vector[0]
+        try:
+            vector_hits = {
+                item.key: item.score
+                for item in self.vector_store.search(query_vector, top_k=max(top_k * 6, 24), sparse_text=query)
+            }
+        except Exception:
+            fallback_store = InMemoryVectorStore()
+            fallback_store.upsert(
+                [
+                    {
+                        "key": self._chunk_key(chunk),
+                        "path": chunk.path,
+                        "start_line": chunk.start_line,
+                        "end_line": chunk.end_line,
+                    }
+                    for chunk in self.chunks
+                ],
+                self.chunk_vectors,
+                [self._chunk_sparse_text(chunk) for chunk in self.chunks],
+            )
+            self.vector_store = fallback_store
+            vector_hits = {
+                item.key: item.score
+                for item in self.vector_store.search(query_vector, top_k=max(top_k * 6, 24), sparse_text=query)
+            }
         scored: list[tuple[float, CodeChunk, list[float]]] = []
         for chunk, terms, counter, vector in zip(
             self.chunks,
@@ -391,15 +461,20 @@ class RepoRetriever:
         ):
             overlap = len(query_terms & terms)
             lexical = overlap / max(1, len(query_terms))
-            semantic = cosine_similarity(query_vector, vector)
+            local_semantic = cosine_similarity(query_vector, vector)
+            semantic = max(local_semantic, vector_hits.get(self._chunk_key(chunk), 0.0))
             if overlap == 0 and semantic < 0.1:
                 continue
             path_bonus = 0.5 if any(term in chunk.path.lower() for term in query_terms) else 0
             symbol_bonus = 0.2 * len(set(tokenize(" ".join(chunk.symbols))) & query_terms)
             call_bonus = 0.1 * len(set(tokenize(" ".join(chunk.calls))) & query_terms)
+            import_bonus = 0.1 * len(
+                set(tokenize("\n".join(chunk.graph_context.get("imports", [])))) & query_terms
+            )
+            graph_bonus = 0.15 if self._has_graph_relation_hit(chunk, query_terms) else 0.0
             idf_bonus = sum(1.0 / max(1, counter.get(term, 0)) for term in query_counter if term in counter)
-            structural = path_bonus + symbol_bonus + call_bonus + min(0.5, 0.05 * idf_bonus)
-            score = lexical * 0.45 + semantic * 0.4 + structural * 0.15
+            structural = path_bonus + symbol_bonus + call_bonus + import_bonus + graph_bonus + min(0.5, 0.05 * idf_bonus)
+            score = lexical * 0.35 + semantic * 0.4 + structural * 0.25
             scored.append((score, chunk, vector))
         scored.sort(key=lambda item: item[0], reverse=True)
         top_scores = scored[:top_k]
@@ -430,9 +505,32 @@ class RepoRetriever:
                 "end_line": chunk.end_line,
                 "symbols": chunk.symbols,
                 "calls": chunk.calls,
+                "graph_context": chunk.graph_context,
                 "retrieval": retrieval.__dict__,
+                "vector_backend": self.vector_store.backend,
+                "vector_backend_reason": getattr(self.vector_store, "fallback_reason", ""),
+                "code_graph_backend": self.code_graph.parser_backend,
             },
         )
+
+    def _chunk_key(self, chunk: CodeChunk) -> str:
+        return f"{chunk.path}:{chunk.start_line}:{chunk.end_line}"
+
+    def _chunk_sparse_text(self, chunk: CodeChunk) -> str:
+        return "\n".join(
+            [
+                chunk.path,
+                " ".join(chunk.symbols),
+                " ".join(chunk.calls),
+                "\n".join(chunk.graph_context.get("imports", [])),
+                chunk.content,
+            ]
+        )
+
+    def _has_graph_relation_hit(self, chunk: CodeChunk, query_terms: set[str]) -> bool:
+        candidates = set(tokenize(" ".join(chunk.symbols + chunk.calls)))
+        imports = set(tokenize("\n".join(chunk.graph_context.get("imports", []))))
+        return bool((candidates | imports) & query_terms)
 
 
 class RepoPilotWorkflow:
@@ -471,6 +569,8 @@ class RepoPilotWorkflow:
             "You are RepoPilot JudgeAgent, evaluating coding-agent outputs.",
             self.llm,
         ) if self.llm else None
+        self.failure_parser = FailureParser()
+        self.patch_selector = PatchSelector()
         self.allowed_patch_prefixes = (
             "app/",
             "tests/",
@@ -493,6 +593,9 @@ class RepoPilotWorkflow:
         apply_worktree: bool = False,
         create_pr: bool = False,
         poll_ci: bool = False,
+        ci_feedback: bool = False,
+        use_memory: bool = True,
+        save_memory: bool = True,
         pr_number: int | None = None,
         comment_body: str = "",
     ) -> RepoDiagnosisResult:
@@ -500,18 +603,35 @@ class RepoPilotWorkflow:
         task = ResearchTask(query=issue, user_type="software_engineer")
         task.mark(TaskStatus.RUNNING)
         task.add_trace("scenario", "start", scenario="repo_pilot", repo=str(repo))
+        memory_store = MemoryStore(repo / ".repopilot" / "memory.sqlite3")
+        memory_hits = memory_store.search(issue, repo_path=str(repo), top_k=3) if use_memory else []
+        if memory_hits:
+            task.add_trace("memory_store", "recall", hits=len(memory_hits))
 
-        chunks = RepoIndexer(repo).build()
+        indexer = RepoIndexer(repo)
+        chunks = indexer.build()
+        code_graph = indexer.code_graph
         task.add_trace("repo_indexer_agent", "finish", chunks=len(chunks))
+        task.add_trace("code_graph_agent", "finish", **code_graph.summary())
 
-        evidence = RepoRetriever(chunks).search(issue, top_k=8)
+        retriever = RepoRetriever(chunks, repo_path=repo, code_graph=code_graph)
+        evidence = retriever.search(issue, top_k=8)
         task.evidence = evidence
-        task.add_trace("code_retriever_agent", "finish", evidence_count=len(evidence))
+        task.add_trace(
+            "code_retriever_agent",
+            "finish",
+            evidence_count=len(evidence),
+            vector_backend=retriever.vector_store.backend,
+            embedding_provider=retriever.embedding_provider,
+        )
 
         suspected_files = self._suspected_files(evidence)
         root_cause = self._root_cause(issue, evidence)
+        if memory_hits:
+            root_cause = root_cause + "\n\n历史相似案例提示:\n" + self._format_memory_hits(memory_hits)
         if self.root_cause_agent:
-            root_cause = self.root_cause_agent.run(issue, evidence)
+            memory_context = "\n\nMemory context:\n" + self._format_memory_hits(memory_hits) if memory_hits else ""
+            root_cause = self.root_cause_agent.run(issue + memory_context, evidence)
             task.add_trace("root_cause_llm_agent", "finish", model="openai_compatible")
         change_plan = self._change_plan(issue, evidence, root_cause)
         if self.patch_planner_agent:
@@ -565,10 +685,13 @@ class RepoPilotWorkflow:
             pr_plan=pr_plan,
             create_pr=create_pr,
             poll_ci=poll_ci,
+            ci_feedback=ci_feedback,
             pr_number=pr_number,
             comment_body=comment_body,
         )
         pr_plan["github"] = github_result
+        failure_signals = self._collect_failure_signals(patch_checks, test_runs, sandbox_runs, github_result)
+        selected_patch = self.patch_selector.choose(patch_checks, sandbox_runs)
 
         task.plan = [
             "解析 issue 的错误现象、触发路径和验收标准",
@@ -590,10 +713,16 @@ class RepoPilotWorkflow:
             "sandbox_runs": sandbox_runs,
             "worktree_runs": worktree_runs,
             "second_pass_advice": second_pass,
+            "failure_signals": [item.__dict__ for item in failure_signals],
+            "selected_patch": selected_patch,
             "pr_plan": pr_plan,
             "brain": "real_llm_multi_agent" if self.use_llm else "rule_based_workflow",
             "sandbox_repair_rounds": max((item.get("repair_round", 1) for item in sandbox_runs), default=0),
-            "retrieval_engine": "hybrid_embedding_rerank",
+            "retrieval_engine": "qdrant_hybrid_tree_sitter_rerank",
+            "code_graph": code_graph.summary(),
+            "vector_backend": retriever.vector_store.backend,
+            "embedding_provider": retriever.embedding_provider,
+            "memory_hits": memory_hits,
         }
         task.report = self._report(task, repo, issue)
         self._judge(task)
@@ -621,6 +750,24 @@ class RepoPilotWorkflow:
                 task.evaluation["passed"] = task.evaluation["overall"] >= 0.75
             task.add_trace("repo_judge_llm_agent", "finish", overall=task.evaluation["overall"])
         task.mark(TaskStatus.SUCCEEDED)
+        if save_memory:
+            memory_id = memory_store.save_from_payload(RepoDiagnosisResult(
+                task=task,
+                repo_path=str(repo),
+                issue=issue,
+                suspected_files=suspected_files,
+                change_plan=change_plan,
+                test_plan=test_plan,
+                risk_items=risk_items,
+                patch_suggestions=patch_suggestions,
+                test_runs=test_runs,
+                patch_checks=patch_checks,
+                sandbox_runs=sandbox_runs,
+                worktree_runs=worktree_runs,
+                pr_plan=pr_plan,
+            ).to_dict())
+            task.analysis["saved_memory_id"] = memory_id
+            task.add_trace("memory_store", "save", memory_id=memory_id)
         task.add_trace("scenario", "finish", score=task.evaluation["overall"])
         return RepoDiagnosisResult(
             task=task,
@@ -637,6 +784,20 @@ class RepoPilotWorkflow:
             worktree_runs=worktree_runs,
             pr_plan=pr_plan,
         )
+
+    def _format_memory_hits(self, memory_hits: list[dict[str, Any]]) -> str:
+        if not memory_hits:
+            return ""
+        lines = []
+        for item in memory_hits:
+            payload = item.get("payload", {})
+            lines.append(
+                f"- memory#{item.get('id')} score={item.get('score')} outcome={item.get('outcome')} "
+                f"issue={item.get('issue')[:120]}\n"
+                f"  summary={item.get('summary')[:240]}\n"
+                f"  suspected={', '.join(payload.get('suspected_files', [])[:5])}"
+            )
+        return "\n".join(lines)
 
     def _suspected_files(self, evidence: list[Evidence]) -> list[str]:
         files: list[str] = []
@@ -1303,6 +1464,18 @@ index 0000000..1111111
             if round_id >= max_rounds:
                 break
             current_issue = self._patch_issue_with_failure_context(current_issue, sandbox_runs, round_id)
+            parsed_failures = []
+            for check in current_checks:
+                if not check.get("passed"):
+                    parsed_failures.extend(self.failure_parser.parse_git_apply(check))
+            for run in sandbox_runs:
+                if not run.get("passed") and run.get("stage") == "sandbox_test":
+                    parsed_failures.extend(self.failure_parser.parse_test_run(run))
+            if parsed_failures:
+                current_issue += "\nStructured failure signals:\n" + "\n".join(
+                    f"- {item.source}:{item.kind} {item.path}:{item.line or ''} {item.message[:300]}"
+                    for item in parsed_failures[:12]
+                )
             if self.patch_suggestion_agent:
                 current_suggestions = self.patch_suggestion_agent.run(current_issue, root_cause, evidence)
             else:
@@ -1325,6 +1498,25 @@ index 0000000..1111111
                 }
             )
         return current_suggestions, current_checks, all_runs
+
+    def _collect_failure_signals(
+        self,
+        patch_checks: list[dict[str, Any]],
+        test_runs: list[dict[str, Any]],
+        sandbox_runs: list[dict[str, Any]],
+        github_result: dict[str, Any],
+    ) -> list[Any]:
+        signals = []
+        for check in patch_checks:
+            if not check.get("passed"):
+                signals.extend(self.failure_parser.parse_git_apply(check))
+        for run in test_runs + sandbox_runs:
+            if not run.get("passed") and run.get("stage") in {None, "sandbox_test"}:
+                signals.extend(self.failure_parser.parse_test_run(run))
+        ci_feedback = github_result.get("ci_feedback") if isinstance(github_result, dict) else None
+        if isinstance(ci_feedback, dict):
+            signals.extend(self.failure_parser.parse_ci_feedback(ci_feedback))
+        return signals[:30]
 
     def _test_commands(self, repo: Path, test_plan: list[str]) -> list[list[str]]:
         commands: list[list[str]] = []
@@ -1415,6 +1607,7 @@ index 0000000..1111111
         pr_plan: dict[str, Any],
         create_pr: bool,
         poll_ci: bool,
+        ci_feedback: bool,
         pr_number: int | None,
         comment_body: str,
     ) -> dict[str, Any]:
@@ -1438,6 +1631,8 @@ index 0000000..1111111
                 active_pr = int(payload["create_pr"].get("number") or 0) or active_pr
         if poll_ci and active_pr:
             payload["ci_checks"] = ops.pr_checks(active_pr)
+        if ci_feedback and active_pr:
+            payload["ci_feedback"] = ops.ci_feedback(active_pr)
         if comment_body and active_pr:
             payload["comment"] = ops.comment_on_pr(active_pr, comment_body)
         payload["active_pr_number"] = active_pr
