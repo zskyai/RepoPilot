@@ -1,0 +1,42 @@
+[
+  {
+    "name": "schema_stability_self_repo",
+    "repo": ".",
+    "issue": "API 返回 JSON schema 字段不稳定，需要定位接口和模型定义"
+  },
+  {
+    "name": "module_path_self_repo",
+    "repo": ".",
+    "issue": "运行 API 服务时出现 No module named app，怀疑是启动目录或包路径配置问题。"
+  },
+  {
+    "name": "readme_quickstart_self_repo",
+    "repo": ".",
+    "issue": "README 需要更清晰的 Quick Start，补充如何配置 .env、如何运行 graph 模式、如何查看 benchmark。"
+  },
+  {
+    "name": "benchmark_docs_self_repo",
+    "repo": ".",
+    "issue": "项目已经有 benchmark，但 README 没有解释 benchmark 输出含义，请补一段面向 GitHub 用户的说明。"
+  },
+  {
+    "name": "sqlite_trace_self_repo",
+    "repo": ".",
+    "issue": "SQLite 持久化已经存在，但缺少说明如何查看 runs.sqlite3 中的结果，补充一个开发者说明或测试入口。"
+  },
+  {
+    "name": "slugify_contributor_docs",
+    "repo": "../open_source_cases/python-slugify",
+    "issue": "README 中展示了大量 slugify 使用方式，但缺少贡献者如何运行测试、核心函数在哪里、如何添加回归用例。"
+  },
+  {
+    "name": "slugify_test_entrypoint",
+    "repo": "../open_source_cases/python-slugify",
+    "issue": "项目测试入口是 test.py，想补充 pytest 运行方式并确保贡献者快速定位测试入口。"
+  },
+  {
+    "name": "slugify_release_docs",
+    "repo": "../open_source_cases/python-slugify",
+    "issue": "README 缺少一段面向维护者的发布前检查说明，例如运行测试、检查核心实现和确认依赖选择。"
+  }
+]

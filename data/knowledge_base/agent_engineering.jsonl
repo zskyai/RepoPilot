@@ -1,0 +1,8 @@
+{"id":"agent-001","source":"internal_playbook","title":"Agent Workflow 工程化原则","content":"企业级 Agent 系统应包含任务规划、工具调用、状态管理、执行轨迹、异常重试、评测回归和数据闭环。复杂任务建议使用状态图或显式工作流编排，避免所有逻辑堆叠在单个 Prompt 中。"}
+{"id":"agent-002","source":"internal_playbook","title":"RAG 质量优化","content":"RAG 系统需要关注文档切分、召回、重排、引用溯源、幻觉检测和评测集建设。企业知识库问答不能只看最终答案，还应记录检索命中文档、上下文片段和生成依据。"}
+{"id":"agent-003","source":"internal_playbook","title":"LLM-as-a-Judge 评测闭环","content":"LLM-as-a-Judge 适合开放式任务评测，但需要明确评分 rubric，并结合人工黄金集、pairwise comparison 和 badcase 回归测试校准稳定性。常见指标包括任务完成度、事实一致性、工具调用合理性、安全性和用户体验。"}
+{"id":"agent-004","source":"internal_playbook","title":"多智能体协作架构","content":"多智能体系统常见角色包括 Planner、Retriever、Analyst、Critic、Reporter、Judge 和 Optimizer。Planner 负责任务拆解，Retriever 获取证据，Analyst 归纳结论，Critic 审查风险，Judge 量化质量，Optimizer 推动下一轮迭代。"}
+{"id":"agent-005","source":"internal_playbook","title":"虚拟用户仿真","content":"虚拟用户仿真可以通过 persona、goal 和 behavior policy 生成多轮对话，用于发现 Agent 在需求澄清、上下文保持、工具调用、安全边界和鲁棒性方面的问题。"}
+{"id":"agent-006","source":"internal_playbook","title":"线上 Agent 可观测性","content":"上线 Agent 需要记录任务 ID、用户类型、Prompt 版本、模型版本、工具输入输出、耗时、异常、重试次数、最终评分和用户反馈。可观测性是 badcase 归因和持续优化的基础。"}
+{"id":"agent-007","source":"case_library","title":"大厂 AI Agent 项目评价标准","content":"能打动面试官的 Agent 项目通常不是简单 Demo，而是具备服务化 API、可配置模型、知识库检索、自动评测、执行轨迹、错误恢复、成本延迟意识和清晰 README 的完整系统。"}
+
