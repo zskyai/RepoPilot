@@ -31,6 +31,8 @@ def main() -> None:
     parser.add_argument("--create-pr", action="store_true", help="Create a GitHub pull request with gh CLI.")
     parser.add_argument("--poll-ci", action="store_true", help="Fetch CI checks for the active PR with gh CLI.")
     parser.add_argument("--ci-feedback", action="store_true", help="Fetch structured CI failure feedback for repair loops.")
+    parser.add_argument("--no-memory", action="store_true", help="Disable retrieval from RepoPilot long-term memory.")
+    parser.add_argument("--no-save-memory", action="store_true", help="Disable saving this run into RepoPilot long-term memory.")
     parser.add_argument("--pr-number", type=int, default=None, help="Existing PR number for CI polling or commenting.")
     parser.add_argument("--comment-body", default="", help="Write a comment back to the PR with gh CLI.")
     parser.add_argument("--save-run", action="store_true", help="Persist run payload to .repopilot/runs.sqlite3.")
@@ -46,6 +48,8 @@ def main() -> None:
         create_pr=args.create_pr,
         poll_ci=args.poll_ci,
         ci_feedback=args.ci_feedback,
+        use_memory=not args.no_memory,
+        save_memory=not args.no_save_memory,
         pr_number=args.pr_number,
         comment_body=args.comment_body,
     )

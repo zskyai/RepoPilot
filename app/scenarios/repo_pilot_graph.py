@@ -46,6 +46,8 @@ class RepoPilotGraphWorkflow:
         create_pr: bool = False,
         poll_ci: bool = False,
         ci_feedback: bool = False,
+        use_memory: bool = True,
+        save_memory: bool = True,
         pr_number: int | None = None,
         comment_body: str = "",
     ) -> RepoDiagnosisResult:
@@ -59,6 +61,8 @@ class RepoPilotGraphWorkflow:
                 "create_pr": create_pr,
                 "poll_ci": poll_ci,
                 "ci_feedback": ci_feedback,
+                "use_memory": use_memory,
+                "save_memory": save_memory,
                 "pr_number": pr_number,
                 "comment_body": comment_body,
                 "repair_round": 0,
@@ -133,6 +137,8 @@ class RepoPilotGraphWorkflow:
             create_pr=payload.get("create_pr", False),
             poll_ci=payload.get("poll_ci", False),
             ci_feedback=payload.get("ci_feedback", False),
+            use_memory=payload.get("use_memory", True),
+            save_memory=payload.get("save_memory", True),
             pr_number=payload.get("pr_number"),
             comment_body=payload.get("comment_body", ""),
         )
