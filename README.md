@@ -49,6 +49,18 @@ The current implementation includes:
 - Benchmark runner with stable multi-case evaluation
 - FastAPI dashboard for interactive runs
 
+## Validated Results
+
+Recent local validation on this project:
+
+- `pytest`: passed
+- Tree-sitter code graph: parsed 36 repository files
+- code graph extraction: 233 symbols, 1502 relations
+- hybrid retrieval backend: `qdrant_local_dense_sparse_rrf`
+- approval gate smoke: passed
+- SWE-style runner smoke: `pass_at_1 = 1.0`
+- GitHub CI on PR branch: passed
+
 ## Quick Start
 
 ### 1. Install
@@ -216,7 +228,6 @@ See:
 - `docs/benchmark.md`
 - `docs/github_integration.md`
 - `docs/memory.md`
-- `docs/benchmark.md`
 
 ## What Makes It Different From Direct LLM Calls
 
