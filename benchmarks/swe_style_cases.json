@@ -5,5 +5,33 @@
     "issue": "Locate RepoPilot retrieval and graph workflow code paths and verify the advanced retrieval architecture.",
     "test_command": "python -m pytest -q",
     "setup_commands": []
+  },
+  {
+    "instance_id": "repopilot_self_approval_gate",
+    "repo": ".",
+    "issue": "Check how RepoPilot blocks worktree mutation behind an approval gate and where approval state is stored.",
+    "test_command": "python -m pytest -q",
+    "setup_commands": []
+  },
+  {
+    "instance_id": "repopilot_self_repair_signals",
+    "repo": ".",
+    "issue": "Find the structured repair loop for pytest failures, git apply failures, and CI feedback annotations.",
+    "test_command": "python -m pytest -q",
+    "setup_commands": []
+  },
+  {
+    "instance_id": "repopilot_self_swe_runner",
+    "repo": ".",
+    "issue": "Locate the SWE-bench style runner and explain how it clones or copies repositories, runs setup commands, and reports pass_at_1.",
+    "test_command": "python -m pytest -q",
+    "setup_commands": []
+  },
+  {
+    "instance_id": "repopilot_self_github_workflow",
+    "repo": ".",
+    "issue": "Find the GitHub PR and CI workflow implementation together with the approval gate and persistent trace outputs.",
+    "test_command": "python -m pytest -q",
+    "setup_commands": []
   }
 ]
