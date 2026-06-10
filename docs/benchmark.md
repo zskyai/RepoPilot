@@ -80,6 +80,17 @@ Current public self-hosted SWE-style snapshot:
 
 This is a self-hosted stable suite, not an official SWE-bench leaderboard claim. Its purpose is to show repeatable end-to-end agent behavior on controlled repository tasks.
 
+Recent validated documentation-oriented benchmark gains:
+
+- `readme_quickstart_self_repo = 0.925`
+- `benchmark_docs_self_repo = 0.925`
+- `sqlite_trace_self_repo = 0.925`
+- `slugify_contributor_docs = 0.836`
+- `slugify_test_entrypoint = 0.836`
+- `slugify_release_docs = 0.836`
+
+These gains came from real patch-quality improvements, especially better README-targeted patch generation, whitespace-tolerant `git apply` fallback on mixed-EOL repositories, and automatic unified-diff hunk recounting before patch validation.
+
 ## Current State
 
 Current benchmark contains 8 stable cases covering:

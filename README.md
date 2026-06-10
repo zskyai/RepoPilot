@@ -88,6 +88,22 @@ See:
 - `docs/benchmark.md`
 - `docs/case_studies.md`
 
+## Recent Validated Upgrades
+
+Recent work focused on making documentation-oriented patching behave more like a real coding agent instead of a generic LLM wrapper.
+
+- improved open-source README patch quality on `python-slugify`
+- improved self-repo README patch quality for Quick Start, benchmark output explanation, and SQLite run-history guidance
+- added whitespace-tolerant `git apply` fallback for mixed-EOL repositories
+- added automatic unified-diff hunk recounting so valid patches are less likely to fail on line-count drift
+- kept benchmark scoring tied to real patch checks, sandbox apply, and executable test signals
+
+The result is a stronger patch-quality profile:
+
+- self-repo documentation cases now reach `0.925`
+- open-source documentation cases now reach `0.836`
+- full 8-case benchmark average is `0.865`
+
 ## Quick Start
 
 ### 1. Install
@@ -255,6 +271,8 @@ To inspect persisted checkpoints for a graph run:
 ```powershell
 .\.venv\Scripts\python.exe run_approval.py --repo . --checkpoints "<graph_run_id>"
 ```
+
+For a concise public-facing summary of the strongest recent runs, see `docs/case_studies.md`.
 
 ## Architecture
 
