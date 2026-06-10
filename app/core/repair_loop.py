@@ -261,6 +261,7 @@ class PatchSelector:
         touched_files = patch_check.get("touched_files", [])
         overlap_bonus = self._failure_overlap_bonus(touched_files, failure_signals)
         touched_penalty = max(0.0, (len(touched_files) - 2) * 1.5)
+        hunk_penalty = max(0.0, (self._hunk_count(patch_file) - 1) * 1.25)
         passed = bool(patch_check.get("passed")) and (not related_runs or all(item.get("passed") for item in related_runs))
         score = 0.0
         score += 10.0 if patch_check.get("passed") else -5.0
@@ -269,6 +270,7 @@ class PatchSelector:
         score -= failures * 3.0
         score += overlap_bonus
         score -= touched_penalty
+        score -= hunk_penalty
         return PatchCandidateScore(
             title=patch_check.get("title", ""),
             patch_file=patch_file,
@@ -303,3 +305,10 @@ class PatchSelector:
             return 0.0
         overlaps = sum(1 for path in touched_files if path.replace("\\", "/") in signal_paths)
         return min(6.0, overlaps * 3.0)
+
+    def _hunk_count(self, patch_file: str) -> int:
+        try:
+            lines = open(patch_file, encoding="utf-8").read().splitlines()
+        except OSError:
+            return 0
+        return sum(1 for line in lines if line.startswith("@@"))
