@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
+import shutil
 import subprocess
+import tempfile
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -189,6 +192,51 @@ class GitHubOps:
         summary["repair_context"] = self.format_repair_context(summary)
         return summary
 
+    def pr_info(self, pr_number: int) -> dict[str, Any]:
+        if not self.is_authenticated():
+            return {"ok": False, "error": "gh is unavailable or not authenticated."}
+        slug = self.repo_slug()
+        if not slug:
+            return {"ok": False, "error": "Could not infer GitHub repo slug from origin remote."}
+        if self.command_exists("gh") and not self.github_token:
+            completed = subprocess.run(
+                ["gh", "pr", "view", str(pr_number), "--json", "number,headRefName,headRefOid,baseRefName,url,state"],
+                cwd=self.repo,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                shell=False,
+            )
+            if completed.returncode == 0:
+                try:
+                    data = json.loads(completed.stdout or "{}")
+                except json.JSONDecodeError:
+                    data = {}
+                return {
+                    "ok": True,
+                    "number": data.get("number"),
+                    "head_ref": data.get("headRefName"),
+                    "head_sha": data.get("headRefOid"),
+                    "base_ref": data.get("baseRefName"),
+                    "url": data.get("url"),
+                    "state": data.get("state"),
+                }
+        response = self._api_request("GET", f"/repos/{slug}/pulls/{pr_number}")
+        if not response.get("ok"):
+            return response
+        data = response["data"]
+        head = data.get("head") or {}
+        base = data.get("base") or {}
+        return {
+            "ok": True,
+            "number": data.get("number"),
+            "head_ref": head.get("ref"),
+            "head_sha": head.get("sha"),
+            "base_ref": base.get("ref"),
+            "url": data.get("html_url"),
+            "state": data.get("state"),
+        }
+
     def check_annotations(self, check_run_id: int) -> dict[str, Any]:
         if not check_run_id:
             return {"ok": False, "annotations": [], "error": "missing check_run_id"}
@@ -251,6 +299,56 @@ class GitHubOps:
         if completed.returncode != 0:
             return {"ok": False, "error": completed.stderr[-1000:]}
         return {"ok": True, "stdout": completed.stdout.strip()}
+
+    def sync_patch_to_branch(self, branch: str, patch_file: str | Path, commit_message: str) -> dict[str, Any]:
+        slug = self.repo_slug()
+        if not self.github_token:
+            return {"ok": False, "error": "GITHUB_TOKEN is required for patch sync."}
+        if not slug:
+            return {"ok": False, "error": "Could not infer GitHub repo slug from origin remote."}
+        patch_path = Path(patch_file)
+        if not patch_path.is_absolute():
+            patch_path = (self.repo / patch_path).resolve()
+        if not patch_path.exists():
+            return {"ok": False, "error": f"Patch file not found: {patch_path}"}
+        targets = self._patch_targets(patch_path.read_text(encoding="utf-8", errors="ignore"))
+        if not targets:
+            return {"ok": False, "error": "No file targets found in patch."}
+
+        with tempfile.TemporaryDirectory(prefix="repopilot_sync_") as temp_dir:
+            temp_repo = Path(temp_dir) / self.repo.name
+            shutil.copytree(
+                self.repo,
+                temp_repo,
+                ignore=shutil.ignore_patterns(".git", ".venv", ".repopilot", "__pycache__", ".pytest_cache", "node_modules"),
+            )
+            completed = subprocess.run(
+                ["git", "apply", str(patch_path)],
+                cwd=temp_repo,
+                capture_output=True,
+                text=True,
+                timeout=60,
+                shell=False,
+            )
+            if completed.returncode != 0:
+                return {"ok": False, "error": f"git apply failed in temp repo: {completed.stderr[-1000:]}"}
+
+            uploaded: list[str] = []
+            for relative_path in targets:
+                source = temp_repo / relative_path
+                if not source.exists():
+                    return {"ok": False, "error": f"Patched file missing after apply: {relative_path}"}
+                upload = self._api_put_file(
+                    slug=slug,
+                    branch=branch,
+                    path=relative_path.as_posix(),
+                    content_bytes=source.read_bytes(),
+                    message=commit_message,
+                )
+                if not upload.get("ok"):
+                    return upload
+                uploaded.append(relative_path.as_posix())
+        return {"ok": True, "branch": branch, "files": uploaded, "count": len(uploaded)}
 
     def repo_slug(self) -> str:
         try:
@@ -336,3 +434,86 @@ class GitHubOps:
             return response
         data = response["data"]
         return {"ok": True, "url": data.get("html_url"), "id": data.get("id")}
+
+    def _api_put_file(
+        self,
+        *,
+        slug: str,
+        branch: str,
+        path: str,
+        content_bytes: bytes,
+        message: str,
+    ) -> dict[str, Any]:
+        existing = self._api_request("GET", f"/repos/{slug}/contents/{path}?ref={branch}")
+        payload = {
+            "message": message,
+            "content": base64.b64encode(content_bytes).decode("ascii"),
+            "branch": branch,
+        }
+        if existing.get("ok"):
+            sha = (existing.get("data") or {}).get("sha")
+            if sha:
+                payload["sha"] = sha
+        response = self._api_request("PUT", f"/repos/{slug}/contents/{path}", payload)
+        if not response.get("ok"):
+            return {
+                "ok": False,
+                "error": f"Failed to upload {path} to {branch}: {response.get('error', '')}",
+            }
+        return {"ok": True, "path": path, "branch": branch}
+
+    def _patch_targets(self, diff_text: str) -> list[Path]:
+        targets: list[Path] = []
+        seen: set[str] = set()
+        for line in diff_text.splitlines():
+            if line.startswith("+++ b/"):
+                raw = line[6:].strip()
+            elif line.startswith("+++ "):
+                raw = line[4:].strip()
+            else:
+                continue
+            if raw == "/dev/null":
+                continue
+            normalized = raw[2:] if raw.startswith("b/") else raw
+            normalized = normalized.strip()
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            targets.append(Path(normalized))
+        return targets
+
+    def build_repair_comment(
+        self,
+        *,
+        ci_feedback: dict[str, Any] | None,
+        failure_signals: list[dict[str, Any]] | None,
+        selected_patch: dict[str, Any] | None,
+    ) -> str:
+        lines = ["RepoPilot repair update", ""]
+        if ci_feedback:
+            lines.append(f"- ci_passed: {ci_feedback.get('passed')}")
+            lines.append(f"- ci_total_checks: {ci_feedback.get('total')}")
+            for item in (ci_feedback.get("failed") or [])[:5]:
+                lines.append(
+                    f"- failed_check: {item.get('name')} conclusion={item.get('conclusion')} url={item.get('details_url')}"
+                )
+        if selected_patch and selected_patch.get("selected"):
+            chosen = selected_patch["selected"]
+            lines.extend(
+                [
+                    "",
+                    "Selected patch candidate:",
+                    f"- title: {chosen.get('title')}",
+                    f"- score: {chosen.get('score')}",
+                    f"- changed_lines: {chosen.get('changed_lines')}",
+                    f"- touched_files: {', '.join(chosen.get('touched_files', []))}",
+                ]
+            )
+        if failure_signals:
+            lines.append("")
+            lines.append("Failure signals:")
+            for item in failure_signals[:8]:
+                lines.append(
+                    f"- {item.get('source')}:{item.get('kind')} {item.get('path','')}:{item.get('line') or ''} {str(item.get('message') or '')[:240]}"
+                )
+        return "\n".join(lines)

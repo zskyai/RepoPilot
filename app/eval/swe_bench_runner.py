@@ -71,6 +71,7 @@ class SWEBenchStyleRunner:
                 sum(item.get("elapsed_seconds", 0.0) for item in results) / max(1, len(results)),
                 2,
             ),
+            "markdown_table": self._markdown_table(results),
             "results": results,
         }
 
@@ -153,3 +154,20 @@ class SWEBenchStyleRunner:
         if stripped.startswith("python "):
             return f'"{sys.executable}" {stripped[len("python "):]}'
         return command
+
+    def _markdown_table(self, results: list[dict[str, Any]]) -> str:
+        lines = [
+            "| case | passed | overall | elapsed_s | trace_db |",
+            "|---|---:|---:|---:|---|",
+        ]
+        for item in results:
+            lines.append(
+                "| {case} | {passed} | {overall} | {elapsed} | `{trace}` |".format(
+                    case=item.get("instance_id", ""),
+                    passed="yes" if item.get("passed") else "no",
+                    overall=item.get("overall", ""),
+                    elapsed=item.get("elapsed_seconds", ""),
+                    trace=item.get("trace_db_path", ""),
+                )
+            )
+        return "\n".join(lines)

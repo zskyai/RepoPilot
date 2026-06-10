@@ -39,7 +39,7 @@ To compare the current LLM workflow against the deterministic baseline:
 To run the SWE-bench style evaluator:
 
 ```powershell
-.\.venv\Scripts\python.exe run_swe_bench_style.py --cases benchmarks\swe_style_cases.json --work-dir .repopilot\swe_runs --max-cases 5
+.\.venv\Scripts\python.exe run_swe_bench_style.py --cases benchmarks\swe_style_cases.json --work-dir .repopilot\swe_runs --max-cases 8
 ```
 
 ## Output
@@ -54,6 +54,7 @@ The benchmark outputs:
 - `pass_at_1` for SWE-style runs
 - external repo test results
 - `graph_run_id` and `trace_db_path`
+- a markdown summary table for README / report reuse
 
 ## Current State
 
@@ -86,3 +87,27 @@ The current local cases focus on:
 - structured repair signal generation
 - benchmark runner usability
 - GitHub/PR workflow documentation and CLI ergonomics
+- memory store discovery
+- persistent trace and checkpoint discovery
+- dashboard operator controls
+
+## Latest SWE-Style Results
+
+Validated on the local self-hosted 8-case suite:
+
+- `case_count = 8`
+- `pass_at_1 = 1.0`
+- `average_elapsed_seconds = 40.9`
+
+```markdown
+| case | passed | overall | elapsed_s | trace_db |
+|---|---:|---:|---:|---|
+| repopilot_self_retrieval_smoke | yes | 0.967 | 77.19 | `F:\agent 项目\enterprise_agent_platform\.repopilot\swe_full\repopilot_self_retrieval_smoke\.repopilot\traces.sqlite3` |
+| repopilot_self_approval_gate | yes | 0.967 | 63.45 | `F:\agent 项目\enterprise_agent_platform\.repopilot\swe_full\repopilot_self_approval_gate\.repopilot\traces.sqlite3` |
+| repopilot_self_repair_signals | yes | 0.967 | 46.31 | `F:\agent 项目\enterprise_agent_platform\.repopilot\swe_full\repopilot_self_repair_signals\.repopilot\traces.sqlite3` |
+| repopilot_self_swe_runner | yes | 0.967 | 24.64 | `F:\agent 项目\enterprise_agent_platform\.repopilot\swe_full\repopilot_self_swe_runner\.repopilot\traces.sqlite3` |
+| repopilot_self_github_workflow | yes | 0.967 | 27.66 | `F:\agent 项目\enterprise_agent_platform\.repopilot\swe_full\repopilot_self_github_workflow\.repopilot\traces.sqlite3` |
+| repopilot_self_memory_store | yes | 0.967 | 28.29 | `F:\agent 项目\enterprise_agent_platform\.repopilot\swe_full\repopilot_self_memory_store\.repopilot\traces.sqlite3` |
+| repopilot_self_trace_store | yes | 0.967 | 31.91 | `F:\agent 项目\enterprise_agent_platform\.repopilot\swe_full\repopilot_self_trace_store\.repopilot\traces.sqlite3` |
+| repopilot_self_dashboard | yes | 0.967 | 27.76 | `F:\agent 项目\enterprise_agent_platform\.repopilot\swe_full\repopilot_self_dashboard\.repopilot\traces.sqlite3` |
+```

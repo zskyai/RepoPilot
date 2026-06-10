@@ -33,5 +33,26 @@
     "issue": "Find the GitHub PR and CI workflow implementation together with the approval gate and persistent trace outputs.",
     "test_command": "python -m pytest -q",
     "setup_commands": []
+  },
+  {
+    "instance_id": "repopilot_self_memory_store",
+    "repo": ".",
+    "issue": "Locate RepoPilot long-term memory storage, semantic recall flow, and saved memory identifiers.",
+    "test_command": "python -m pytest -q",
+    "setup_commands": []
+  },
+  {
+    "instance_id": "repopilot_self_trace_store",
+    "repo": ".",
+    "issue": "Find how graph traces are persisted, how checkpoints are stored, and how a resumed run is labeled.",
+    "test_command": "python -m pytest -q",
+    "setup_commands": []
+  },
+  {
+    "instance_id": "repopilot_self_dashboard",
+    "repo": ".",
+    "issue": "Locate the dashboard controls for approval gate, graph mode, memory, CI feedback, and saved run output.",
+    "test_command": "python -m pytest -q",
+    "setup_commands": []
   }
 ]

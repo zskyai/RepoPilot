@@ -119,3 +119,43 @@ class ApprovalStore:
             }
             for row in rows
         ]
+
+    def latest_checkpoint(self, run_id: str) -> dict[str, Any] | None:
+        with sqlite3.connect(self.db_path) as conn:
+            row = conn.execute(
+                """
+                SELECT node, created_at, state
+                FROM checkpoints
+                WHERE run_id = ?
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (run_id,),
+            ).fetchone()
+        if not row:
+            return None
+        return {
+            "node": row[0],
+            "created_at": row[1],
+            "state": json.loads(row[2]),
+        }
+
+    def list_checkpoints(self, run_id: str) -> list[dict[str, Any]]:
+        with sqlite3.connect(self.db_path) as conn:
+            rows = conn.execute(
+                """
+                SELECT node, created_at, state
+                FROM checkpoints
+                WHERE run_id = ?
+                ORDER BY created_at ASC
+                """,
+                (run_id,),
+            ).fetchall()
+        return [
+            {
+                "node": row[0],
+                "created_at": row[1],
+                "state": json.loads(row[2]),
+            }
+            for row in rows
+        ]
