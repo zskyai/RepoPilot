@@ -36,6 +36,12 @@ To compare the current LLM workflow against the deterministic baseline:
 .\.venv\Scripts\python.exe run_benchmark.py --use-llm --require-llm --run-tests --apply-sandbox --compare-baseline
 ```
 
+To compare single-candidate patch generation against the new multi-candidate portfolio mode:
+
+```powershell
+.\.venv\Scripts\python.exe run_benchmark.py --run-tests --apply-sandbox --compare-multi-candidate
+```
+
 To run the SWE-bench style evaluator:
 
 ```powershell
