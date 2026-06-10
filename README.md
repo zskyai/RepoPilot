@@ -48,6 +48,8 @@ The current implementation includes:
 - SWE-bench style runner in `run_swe_bench_style.py`
 - Benchmark runner with stable multi-case evaluation
 - FastAPI dashboard for interactive runs
+- Execution-unit-driven multi-candidate patch generation
+- Coordinated patch portfolio selection with closed-loop preference
 
 ## Validated Results
 
