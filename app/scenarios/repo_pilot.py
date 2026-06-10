@@ -561,8 +561,14 @@ class RepoRetriever:
             structural = path_bonus + symbol_bonus + call_bonus + import_bonus + graph_bonus + min(0.5, 0.05 * idf_bonus)
             score = lexical * 0.35 + semantic * 0.4 + structural * 0.25
             scored.append((score, chunk, vector))
+        graph_rerank = self._graph_propagation_rerank(scored)
         scored.sort(key=lambda item: item[0], reverse=True)
-        top_scores = scored[:top_k]
+        reranked = []
+        for score, chunk, vector in scored:
+            adjusted = score + graph_rerank.get(chunk.path, 0.0)
+            reranked.append((adjusted, chunk, vector))
+        reranked.sort(key=lambda item: item[0], reverse=True)
+        top_scores = reranked[:top_k]
         return [
             self._to_evidence(chunk, score, query_vector, vector)
             for score, chunk, vector in top_scores
@@ -597,7 +603,26 @@ class RepoRetriever:
             "symbols": symbols[:12],
             "calls": calls[:12],
             "snippets": snippets,
+            "impact_subgraph": self.code_graph.impact_subgraph(files[:4]),
         }
+
+    def predict_impacted_files(self, evidence: list[Evidence], limit: int = 8) -> list[dict[str, Any]]:
+        seed_paths = []
+        for item in evidence[:4]:
+            path = item.metadata.get("path", "")
+            if path and path not in seed_paths:
+                seed_paths.append(path)
+        subgraph = self.code_graph.impact_subgraph(seed_paths, max_hops=2)
+        counts: dict[str, float] = {path: 1.0 for path in seed_paths}
+        for edge in subgraph.get("edges", []):
+            target = edge.get("target", "")
+            hop = float(edge.get("hop", 1) or 1)
+            counts[target] = counts.get(target, 0.0) + (0.6 / hop)
+        ranked = sorted(counts.items(), key=lambda item: item[1], reverse=True)
+        return [
+            {"path": path, "impact_score": round(score, 3), "seed": path in seed_paths}
+            for path, score in ranked[:limit]
+        ]
 
     def _compress_snippet(self, content: str, limit: int = 420) -> str:
         lines = [line.rstrip() for line in content.splitlines() if line.strip()]
@@ -656,6 +681,26 @@ class RepoRetriever:
         candidates = set(tokenize(" ".join(chunk.symbols + chunk.calls)))
         imports = set(tokenize("\n".join(chunk.graph_context.get("imports", []))))
         return bool((candidates | imports) & query_terms)
+
+    def _graph_propagation_rerank(
+        self,
+        scored: list[tuple[float, CodeChunk, list[float]]],
+        top_seed_count: int = 4,
+    ) -> dict[str, float]:
+        seeds = [chunk.path for _score, chunk, _vector in sorted(scored, key=lambda item: item[0], reverse=True)[:top_seed_count]]
+        if not seeds:
+            return {}
+        subgraph = self.code_graph.impact_subgraph(seeds, max_hops=2)
+        propagation: dict[str, float] = {}
+        for edge in subgraph.get("edges", []):
+            source = edge.get("source", "")
+            target = edge.get("target", "")
+            hop = float(edge.get("hop", 1) or 1)
+            source_bonus = 0.08 if source in seeds else 0.04
+            propagation[target] = propagation.get(target, 0.0) + (source_bonus / hop)
+        for seed in seeds:
+            propagation[seed] = propagation.get(seed, 0.0) + 0.12
+        return propagation
 
 
 class RepoPilotWorkflow:
@@ -769,6 +814,7 @@ class RepoPilotWorkflow:
         retriever = RepoRetriever(chunks, repo_path=repo, code_graph=code_graph)
         evidence = retriever.search(issue, top_k=8)
         context_packet = retriever.build_context_packet(evidence)
+        impacted_files = retriever.predict_impacted_files(evidence)
         task.evidence = evidence
         task.add_trace(
             "code_retriever_agent",
@@ -955,6 +1001,7 @@ class RepoPilotWorkflow:
             "implementation_blueprint": implementation_blueprint,
             "root_cause_hypothesis": root_cause,
             "suspected_files": suspected_files,
+            "impacted_files": impacted_files,
             "coordination_plan": coordination_plan,
             "coordination_edges": coordination_edges,
             "coordination_waves": coordination_waves,
@@ -979,6 +1026,7 @@ class RepoPilotWorkflow:
             "intent_engine": "llm_plus_rule_inference" if self.use_llm else "rule_inference",
             "sandbox_repair_rounds": max((item.get("repair_round", 1) for item in sandbox_runs), default=0),
             "retrieval_engine": "qdrant_hybrid_tree_sitter_rerank",
+            "graph_retrieval_mode": "graph_propagation_rerank",
             "code_graph": code_graph.summary(),
             "vector_backend": retriever.vector_store.backend,
             "embedding_provider": retriever.embedding_provider,
