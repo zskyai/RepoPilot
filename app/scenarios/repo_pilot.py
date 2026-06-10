@@ -678,6 +678,8 @@ class RepoPilotWorkflow:
 
         suspected_files = self._suspected_files(evidence)
         coordination_plan = self._multi_file_coordination_plan(evidence, code_graph)
+        coordination_edges = self._coordination_edges(coordination_plan)
+        coordination_waves = self._coordination_waves(coordination_plan, coordination_edges)
         root_cause = self._root_cause(issue, evidence)
         if memory_hits:
             root_cause = root_cause + "\n\n历史相似案例提示:\n" + self._format_memory_hits(memory_hits)
@@ -695,16 +697,17 @@ class RepoPilotWorkflow:
             change_plan = self.patch_planner_agent.run(issue, root_cause, evidence)
             task.add_trace("patch_planner_llm_agent", "finish", steps=len(change_plan))
         test_plan = self._test_plan(repo, issue, suspected_files)
+        atomic_change_bundle = self._atomic_change_bundle(coordination_plan, test_plan)
         risk_items = self._risk_review(issue, suspected_files)
         patch_suggestions = self._patch_suggestions(issue, suspected_files, root_cause)
         if self.patch_suggestion_agent:
             patch_suggestions = self.patch_suggestion_agent.run(issue, root_cause, evidence)
             task.add_trace("patch_suggestion_llm_agent", "finish", suggestions=len(patch_suggestions))
-        patch_checks = self._check_patches(repo, patch_suggestions)
+        patch_checks = self._check_patches(repo, patch_suggestions, coordination_plan=coordination_plan)
         if patch_suggestions and not any(item.get("passed") for item in patch_checks):
             fallback = self._patch_suggestions(issue, suspected_files, root_cause)
             patch_suggestions = fallback
-            patch_checks = self._check_patches(repo, patch_suggestions)
+            patch_checks = self._check_patches(repo, patch_suggestions, coordination_plan=coordination_plan)
             task.add_trace(
                 "patch_fallback_agent",
                 "finish",
@@ -725,6 +728,7 @@ class RepoPilotWorkflow:
                 root_cause=root_cause,
                 evidence=evidence,
                 suspected_files=suspected_files,
+                coordination_plan=coordination_plan,
                 test_plan=test_plan,
                 patch_suggestions=patch_suggestions,
                 patch_checks=patch_checks,
@@ -779,6 +783,9 @@ class RepoPilotWorkflow:
             "root_cause_hypothesis": root_cause,
             "suspected_files": suspected_files,
             "coordination_plan": coordination_plan,
+            "coordination_edges": coordination_edges,
+            "coordination_waves": coordination_waves,
+            "atomic_change_bundle": atomic_change_bundle,
             "change_plan": change_plan,
             "test_plan": test_plan,
             "risk_items": risk_items,
@@ -938,6 +945,155 @@ class RepoPilotWorkflow:
                 }
             )
         return plan
+
+    def _coordination_edges(self, coordination_plan: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if not coordination_plan:
+            return []
+        role_by_path = {item.get("path", "").replace("\\", "/"): item.get("role", "primary") for item in coordination_plan}
+        edges: list[dict[str, Any]] = []
+        seen: set[tuple[str, str, str]] = set()
+        for item in coordination_plan:
+            source = item.get("path", "").replace("\\", "/")
+            if not source:
+                continue
+            for target_raw in item.get("related_files", []) or []:
+                target = str(target_raw).replace("\\", "/")
+                if not target or target == source:
+                    continue
+                relation = "depends_on"
+                if item.get("role") == "test" and role_by_path.get(target) == "primary":
+                    relation = "verifies"
+                elif item.get("role") == "support":
+                    relation = "configures"
+                edge_key = (source, target, relation)
+                if edge_key in seen:
+                    continue
+                seen.add(edge_key)
+                edges.append({"source": source, "target": target, "relation": relation})
+        return edges
+
+    def _coordination_waves(
+        self,
+        coordination_plan: list[dict[str, Any]],
+        coordination_edges: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        if not coordination_plan:
+            return []
+        normalized_items = []
+        for item in coordination_plan:
+            clone = dict(item)
+            clone["path"] = clone.get("path", "").replace("\\", "/")
+            normalized_items.append(clone)
+        item_by_path = {item["path"]: item for item in normalized_items if item.get("path")}
+        dependencies = {path: set() for path in item_by_path}
+        for edge in coordination_edges:
+            source = edge.get("source", "")
+            target = edge.get("target", "")
+            if source in dependencies and target in item_by_path and edge.get("relation") != "verifies":
+                dependencies[source].add(target)
+        remaining = set(item_by_path)
+        waves: list[dict[str, Any]] = []
+        wave_id = 1
+        role_priority = {"primary": 0, "support": 1, "test": 2}
+        while remaining:
+            ready = [
+                path
+                for path in remaining
+                if not [dep for dep in dependencies.get(path, set()) if dep in remaining]
+            ]
+            if not ready:
+                ready = sorted(
+                    remaining,
+                    key=lambda path: (role_priority.get(item_by_path[path].get("role", "primary"), 9), path),
+                )
+            else:
+                ready = sorted(
+                    ready,
+                    key=lambda path: (role_priority.get(item_by_path[path].get("role", "primary"), 9), path),
+                )
+            if any(item_by_path[path].get("role") != "test" for path in ready):
+                selected = [path for path in ready if item_by_path[path].get("role") != "test"]
+            else:
+                selected = ready[:]
+            waves.append(
+                {
+                    "wave": wave_id,
+                    "files": selected,
+                    "roles": [item_by_path[path].get("role", "primary") for path in selected],
+                }
+            )
+            remaining.difference_update(selected)
+            wave_id += 1
+        return waves
+
+    def _atomic_change_bundle(self, coordination_plan: list[dict[str, Any]], test_plan: list[str]) -> dict[str, Any]:
+        normalized = []
+        for item in coordination_plan:
+            clone = dict(item)
+            clone["path"] = clone.get("path", "").replace("\\", "/")
+            clone["related_files"] = [str(path).replace("\\", "/") for path in clone.get("related_files", []) or []]
+            normalized.append(clone)
+        primary_files = [item["path"] for item in normalized if item.get("role") == "primary"]
+        test_files = [item["path"] for item in normalized if item.get("role") == "test"]
+        support_files = [item["path"] for item in normalized if item.get("role") == "support"]
+        linked_tests: list[str] = []
+        for item in normalized:
+            if item.get("role") != "test":
+                continue
+            if any(target in primary_files for target in item.get("related_files", [])) and item["path"] not in linked_tests:
+                linked_tests.append(item["path"])
+        return {
+            "bundle_type": "atomic_multi_file" if len(normalized) > 1 else "single_file",
+            "required_primary_files": primary_files[:4],
+            "required_test_files": linked_tests[:4] or test_files[:4],
+            "support_files": support_files[:4],
+            "expected_test_commands": test_plan[:3],
+            "coordination_depth": max((len(item.get("related_files", [])) for item in normalized), default=0),
+        }
+
+    def _assess_patch_coordination(
+        self,
+        touched_files: list[str],
+        coordination_plan: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        normalized_touched = [path.replace("\\", "/") for path in touched_files]
+        if not normalized_touched or not coordination_plan:
+            return {
+                "score": 0.0 if not normalized_touched else 0.5,
+                "complete": False,
+                "missing_primary_files": [],
+                "missing_test_files": [],
+                "covered_roles": [],
+            }
+        bundle = self._atomic_change_bundle(coordination_plan, test_plan=[])
+        required_primary = [path for path in bundle.get("required_primary_files", []) if path in {item.get("path", "").replace("\\", "/") for item in coordination_plan}]
+        required_tests = bundle.get("required_test_files", [])
+        missing_primary = [path for path in required_primary if path not in normalized_touched]
+        linked_tests = [path for path in required_tests if any(primary in normalized_touched for primary in required_primary)]
+        missing_tests = [path for path in linked_tests if path not in normalized_touched]
+        covered_roles: list[str] = []
+        if any(path in normalized_touched for path in required_primary):
+            covered_roles.append("primary")
+        if any(path in normalized_touched for path in required_tests):
+            covered_roles.append("test")
+        if any(item.get("role") == "support" and item.get("path", "").replace("\\", "/") in normalized_touched for item in coordination_plan):
+            covered_roles.append("support")
+        score = 1.0
+        if missing_primary:
+            score -= 0.35
+        if missing_tests:
+            score -= 0.2
+        if len(normalized_touched) == 1 and len(required_primary) + len(required_tests) > 1:
+            score -= 0.15
+        score = max(0.0, round(score, 3))
+        return {
+            "score": score,
+            "complete": not missing_primary and not missing_tests,
+            "missing_primary_files": missing_primary[:4],
+            "missing_test_files": missing_tests[:4],
+            "covered_roles": covered_roles,
+            "bundle_type": bundle.get("bundle_type", "single_file"),
+        }
 
     def _root_cause(self, issue: str, evidence: list[Evidence]) -> str:
         text = issue.lower()
@@ -1318,7 +1474,12 @@ index 0000000..1111111
                     )
         return expanded
 
-    def _check_patches(self, repo: Path, patch_suggestions: list[dict[str, str]]) -> list[dict[str, Any]]:
+    def _check_patches(
+        self,
+        repo: Path,
+        patch_suggestions: list[dict[str, str]],
+        coordination_plan: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
         checks = []
         patch_dir = repo / ".repopilot" / "patches"
         patch_dir.mkdir(parents=True, exist_ok=True)
@@ -1334,6 +1495,7 @@ index 0000000..1111111
                 "target_file": suggestion.get("target_file", ""),
                 "touched_files": touched_files,
                 "coordination_group": self._coordination_group(touched_files),
+                "coordination_assessment": self._assess_patch_coordination(touched_files, coordination_plan or []),
                 "apply_check": "skipped",
                 "passed": False,
                 "stderr": "",
@@ -1489,6 +1651,7 @@ index 0000000..1111111
                     "sandbox": str(sandbox_root),
                     "patch_file": str(patch_file),
                     "coordination_group": item.get("coordination_group", {}),
+                    "coordination_assessment": item.get("coordination_assessment", {}),
                     "returncode": apply_result.returncode,
                     "passed": apply_result.returncode == 0,
                     "stdout": apply_result.stdout[-1000:],
@@ -1504,6 +1667,7 @@ index 0000000..1111111
                     test["repair_round"] = repair_round
                     test["ranking"] = item.get("ranking", {})
                     test["coordination_group"] = item.get("coordination_group", {})
+                    test["coordination_assessment"] = item.get("coordination_assessment", {})
                     runs.append(test)
             candidate_runs = [entry for entry in runs if entry.get("patch_file") == str(patch_file)]
             if candidate_runs and all(entry.get("passed") for entry in candidate_runs):
@@ -1683,6 +1847,7 @@ index 0000000..1111111
         root_cause: str,
         evidence: list[Evidence],
         suspected_files: list[str],
+        coordination_plan: list[dict[str, Any]],
         test_plan: list[str],
         patch_suggestions: list[dict[str, str]],
         patch_checks: list[dict[str, Any]],
@@ -1749,7 +1914,7 @@ index 0000000..1111111
                 current_suggestions = self.patch_suggestion_agent.run(current_issue, root_cause, evidence)
             else:
                 current_suggestions = self._patch_suggestions(current_issue, suspected_files, root_cause)
-            current_checks = self._check_patches(repo, current_suggestions)
+            current_checks = self._check_patches(repo, current_suggestions, coordination_plan=coordination_plan)
             all_runs.append(
                 {
                     "stage": "repair_advice",
@@ -2191,6 +2356,15 @@ index 0000000..1111111
             lines.append(
                 f"- {status}: {item.get('title')} | {item.get('apply_check')} | {item.get('patch_file')}"
             )
+            assessment = item.get("coordination_assessment") or {}
+            if assessment:
+                lines.append(
+                    "  - coordination: "
+                    f"score={assessment.get('score')} "
+                    f"complete={assessment.get('complete')} "
+                    f"missing_primary={assessment.get('missing_primary_files', [])} "
+                    f"missing_test={assessment.get('missing_test_files', [])}"
+                )
             if item.get("stderr"):
                 lines.append(f"  - {item['stderr'][:300]}")
         return "\n".join(lines)
@@ -2207,6 +2381,7 @@ index 0000000..1111111
                 f"repair_round={item.get('repair_round')}\n"
                 f"sandbox={item.get('sandbox')}\n"
                 f"returncode={item.get('returncode')}\n"
+                f"coordination={json.dumps(item.get('coordination_assessment', {}), ensure_ascii=False)}\n"
                 f"```text\n{output[-800:]}\n```"
             )
         return "\n".join(blocks)
