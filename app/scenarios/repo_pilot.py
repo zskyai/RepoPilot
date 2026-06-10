@@ -1700,8 +1700,8 @@ index 0000000..1111111
                 "维护者",
             ]
         )
-        targets_readme = any(path.lower().endswith("readme.md") for path in suspected_files)
-        if not mentions_docs and not targets_readme:
+        mentions_readme_issue = any(token in text for token in ["readme", "quick start", "quickstart", "贡献者", "文档"])
+        if not mentions_docs and not mentions_readme_issue:
             return None
         if any(token in text for token in ["pytest", "test.py", "测试入口", "entrypoint"]):
             return "test_entrypoint_docs"
@@ -1709,7 +1709,7 @@ index 0000000..1111111
             return "maintainer_release_docs"
         if any(token in text for token in ["contributor", "回归用例", "核心函数", "贡献者"]):
             return "contributor_docs"
-        if targets_readme:
+        if mentions_readme_issue:
             return "generic_readme_docs"
         return None
 
@@ -3276,16 +3276,14 @@ index 0000000..1111111
         test_score = 1.0 if len(task.analysis["test_plan"]) >= 3 else 0.5
         risk_score = 1.0 if task.analysis["risk_items"] else 0.4
         patch_score = 1.0 if task.analysis.get("patch_suggestions") else 0.4
-        patch_check_score = 1.0 if any(item.get("passed") for item in task.analysis.get("patch_checks", [])) else 0.6
+        patch_check_score = 1.0 if self._has_validated_patch(task.analysis) else 0.6
         if task.analysis.get("test_runs"):
             scored_runs = [item for item in task.analysis["test_runs"] if item["command"] != "repair_advisor"]
             executed_test_score = sum(self._test_run_credit(item) for item in scored_runs) / max(1, len(scored_runs))
         else:
             executed_test_score = 0.6
         if task.analysis.get("sandbox_runs"):
-            sandbox_score = sum(1 for item in task.analysis["sandbox_runs"] if item.get("passed")) / max(
-                1, len(task.analysis["sandbox_runs"])
-            )
+            sandbox_score = self._sandbox_validation_score(task.analysis["sandbox_runs"])
         else:
             sandbox_score = 0.7
         overall = round(
@@ -3347,6 +3345,34 @@ index 0000000..1111111
         if any(signal in output for signal in dependency_signals):
             return 0.5
         return 0.0
+
+    def _has_validated_patch(self, analysis: dict[str, Any]) -> bool:
+        if any(item.get("passed") for item in analysis.get("patch_checks", [])):
+            return True
+        return any(
+            item.get("stage") == "apply_patch" and item.get("passed")
+            for item in analysis.get("sandbox_runs", [])
+        )
+
+    def _sandbox_validation_score(self, sandbox_runs: list[dict[str, Any]]) -> float:
+        validation_runs = [
+            item
+            for item in sandbox_runs
+            if item.get("stage") in {"apply_patch", "sandbox_test"}
+        ]
+        if not validation_runs:
+            return 0.0
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for item in validation_runs:
+            patch_file = str(item.get("patch_file") or "")
+            grouped.setdefault(patch_file, []).append(item)
+        if not grouped:
+            return sum(1 for item in validation_runs if item.get("passed")) / max(1, len(validation_runs))
+        best = 0.0
+        for runs in grouped.values():
+            ratio = sum(1 for item in runs if item.get("passed")) / max(1, len(runs))
+            best = max(best, ratio)
+        return best
         task.optimization = {
             "badcase_type": "none" if task.evaluation["passed"] else "weak_issue_localization",
             "suggestions": [

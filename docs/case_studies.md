@@ -26,8 +26,8 @@ RepoPilot localized the task to:
 It then produced a documentation-oriented patch proposal and reached:
 
 - `patch_apply_check = 1.0`
-- `sandbox_apply = 0.357`
-- `overall = 0.836`
+- `sandbox_apply = 0.333`
+- `overall = 0.833`
 
 ### Why This Case Matters
 
@@ -63,14 +63,16 @@ The repository already had working features, but GitHub-facing documentation was
 
 RepoPilot now handles these documentation-style tasks as real patching problems instead of generic prose generation. The recent validated self-repo cases reached:
 
-- `readme_quickstart_self_repo = 0.925`
-- `benchmark_docs_self_repo = 0.925`
-- `sqlite_trace_self_repo = 0.925`
+- `schema_stability_self_repo = 0.935`
+- `module_path_self_repo = 0.935`
+- `readme_quickstart_self_repo = 0.935`
+- `benchmark_docs_self_repo = 0.935`
+- `sqlite_trace_self_repo = 0.935`
 
 Shared characteristics:
 
 - `patch_apply_check = 1.0`
-- `sandbox_apply = 0.571`
+- `sandbox_apply = 0.667`
 - localized support file: `README.md`
 
 ### Why This Case Matters
@@ -90,8 +92,8 @@ Latest validated snapshot:
 
 - `case_count = 8`
 - `pass_rate = 1.0`
-- `average_overall = 0.865`
-- `average_elapsed_seconds = 40.1`
+- `average_overall = 0.897`
+- `average_elapsed_seconds = 76.2`
 
 Coverage includes:
 
