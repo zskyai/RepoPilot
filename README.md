@@ -26,6 +26,7 @@ The current implementation includes:
 
 - Tree-sitter code knowledge graph
 - Qdrant dense + sparse hybrid retrieval with RRF fusion
+- GraphRAG-style retrieval with graph propagation rerank
 - LangGraph-style execution with persistent traces
 - approval gates before worktree or GitHub mutation
 - structured repair signals from `pytest`, `git apply`, and GitHub CI
@@ -38,6 +39,7 @@ The current implementation includes:
 - Tree-sitter code knowledge graph for Python, JavaScript, TypeScript, and TSX
 - Qdrant-backed hybrid retrieval: lexical, dense vector, symbol/call/import, and rerank scoring
 - Qdrant dense + sparse hybrid retrieval with RRF fusion
+- Impacted-file prediction from code graph subgraphs
 - Sandbox patch apply and test execution
 - Worktree patch apply with guardrails
 - GitHub PR, CI, and PR comment integration
