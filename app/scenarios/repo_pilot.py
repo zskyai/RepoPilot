@@ -450,10 +450,17 @@ class RepoIndexer:
 
 
 class RepoRetriever:
-    def __init__(self, chunks: list[CodeChunk], repo_path: str | Path, code_graph: CodeGraph) -> None:
+    def __init__(
+        self,
+        chunks: list[CodeChunk],
+        repo_path: str | Path,
+        code_graph: CodeGraph,
+        enable_graph_rerank: bool = True,
+    ) -> None:
         self.chunks = chunks
         self.repo_path = Path(repo_path).resolve()
         self.code_graph = code_graph
+        self.enable_graph_rerank = enable_graph_rerank
         self.embedding_client = build_embedding_client()
         self.embedding_provider = getattr(self.embedding_client, "provider", "unknown")
         self.chunk_terms = [
@@ -561,7 +568,7 @@ class RepoRetriever:
             structural = path_bonus + symbol_bonus + call_bonus + import_bonus + graph_bonus + min(0.5, 0.05 * idf_bonus)
             score = lexical * 0.35 + semantic * 0.4 + structural * 0.25
             scored.append((score, chunk, vector))
-        graph_rerank = self._graph_propagation_rerank(scored)
+        graph_rerank = self._graph_propagation_rerank(scored) if self.enable_graph_rerank else {}
         scored.sort(key=lambda item: item[0], reverse=True)
         reranked = []
         for score, chunk, vector in scored:
@@ -603,10 +610,17 @@ class RepoRetriever:
             "symbols": symbols[:12],
             "calls": calls[:12],
             "snippets": snippets,
-            "impact_subgraph": self.code_graph.impact_subgraph(files[:4]),
+            "impact_subgraph": self.code_graph.impact_subgraph(files[:4]) if self.enable_graph_rerank else {"seed_paths": files[:4], "nodes": files[:4], "edges": []},
         }
 
     def predict_impacted_files(self, evidence: list[Evidence], limit: int = 8) -> list[dict[str, Any]]:
+        if not self.enable_graph_rerank:
+            paths = []
+            for item in evidence[:limit]:
+                path = item.metadata.get("path", "")
+                if path and path not in paths:
+                    paths.append(path)
+            return [{"path": path, "impact_score": 1.0 if idx == 0 else 0.8, "seed": True} for idx, path in enumerate(paths[:limit])]
         seed_paths = []
         for item in evidence[:4]:
             path = item.metadata.get("path", "")
@@ -717,10 +731,12 @@ class RepoPilotWorkflow:
         require_llm: bool = False,
         llm: LLMClient | None = None,
         enable_multi_candidate: bool = True,
+        enable_graph_rerank: bool = True,
     ) -> None:
         self.use_llm = use_llm
         self.llm = llm or (build_llm(require_config=require_llm) if use_llm else None)
         self.enable_multi_candidate = enable_multi_candidate
+        self.enable_graph_rerank = enable_graph_rerank
         self.intent_agent = IntentAgent(
             "intent_agent",
             "You are RepoPilot IntentAgent, extracting user intent, constraints, and acceptance criteria.",
@@ -811,7 +827,12 @@ class RepoPilotWorkflow:
         task.add_trace("repo_indexer_agent", "finish", chunks=len(chunks))
         task.add_trace("code_graph_agent", "finish", **code_graph.summary())
 
-        retriever = RepoRetriever(chunks, repo_path=repo, code_graph=code_graph)
+        retriever = RepoRetriever(
+            chunks,
+            repo_path=repo,
+            code_graph=code_graph,
+            enable_graph_rerank=self.enable_graph_rerank,
+        )
         evidence = retriever.search(issue, top_k=8)
         context_packet = retriever.build_context_packet(evidence)
         impacted_files = retriever.predict_impacted_files(evidence)
@@ -882,6 +903,7 @@ class RepoPilotWorkflow:
             implementation_blueprint=implementation_blueprint,
             execution_units=execution_units,
             acceptance_bundle=acceptance_bundle,
+            impacted_files=impacted_files,
         )
         if self.patch_suggestion_agent:
             patch_suggestions = self.patch_suggestion_agent.run(
@@ -911,6 +933,7 @@ class RepoPilotWorkflow:
                 implementation_blueprint=implementation_blueprint,
                 execution_units=execution_units,
                 acceptance_bundle=acceptance_bundle,
+                impacted_files=impacted_files,
             )
             patch_suggestions = fallback
             if not self.enable_multi_candidate and patch_suggestions:
@@ -1026,7 +1049,7 @@ class RepoPilotWorkflow:
             "intent_engine": "llm_plus_rule_inference" if self.use_llm else "rule_inference",
             "sandbox_repair_rounds": max((item.get("repair_round", 1) for item in sandbox_runs), default=0),
             "retrieval_engine": "qdrant_hybrid_tree_sitter_rerank",
-            "graph_retrieval_mode": "graph_propagation_rerank",
+            "graph_retrieval_mode": "graph_propagation_rerank" if self.enable_graph_rerank else "no_graph_rerank",
             "code_graph": code_graph.summary(),
             "vector_backend": retriever.vector_store.backend,
             "embedding_provider": retriever.embedding_provider,
@@ -1624,6 +1647,7 @@ index 0000000..1111111
         implementation_blueprint: dict[str, Any] | None = None,
         execution_units: list[dict[str, Any]] | None = None,
         acceptance_bundle: dict[str, Any] | None = None,
+        impacted_files: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, str]]:
         text = issue.lower()
         suggestions: list[dict[str, str]] = []
@@ -1726,6 +1750,27 @@ index 0000000..1111111
 +    # TODO: encode the failing behavior around {target}
 +    assert True
 """,
+                    }
+                )
+            for item in (impacted_files or [])[:3]:
+                impact_path = str(item.get("path", ""))
+                if not impact_path or impact_path == target or not impact_path.endswith((".py", ".ts", ".tsx", ".js")):
+                    continue
+                suggestions.append(
+                    {
+                        "title": f"Graph-impact candidate for {impact_path}",
+                        "target_file": impact_path,
+                        "reason": "Graph impact prediction indicates this file is near the failure propagation path and should be considered in the patch portfolio.",
+                        "diff": (
+                            f"diff --git a/{impact_path} b/{impact_path}\n"
+                            f"--- a/{impact_path}\n"
+                            f"+++ b/{impact_path}\n"
+                            "@@ -1,3 +1,7 @@\n"
+                            "+# RepoPilot graph-impact candidate\n"
+                            "+# Root cause hint: "
+                            + root_cause[:80].replace("\n", " ")
+                            + "\n"
+                        ),
                     }
                 )
             if self.enable_multi_candidate:
