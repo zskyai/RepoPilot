@@ -2119,9 +2119,9 @@ index 0000000..1111111
             if evaluated >= candidate_limit:
                 break
             evaluated += 1
-            sandbox_root = repo / ".repopilot" / "sandbox"
+            sandbox_root = repo / ".repopilot" / f"sandbox_r{repair_round}_c{evaluated}"
             if sandbox_root.exists():
-                shutil.rmtree(sandbox_root)
+                self._safe_rmtree(sandbox_root)
             ignore = shutil.ignore_patterns(".git", ".venv", ".repopilot", "__pycache__", ".pytest_cache")
             shutil.copytree(repo, sandbox_root, ignore=ignore)
             patch_file = Path(item["patch_file"])
@@ -2166,7 +2166,7 @@ index 0000000..1111111
                 if validated_candidates >= 2:
                     break
         if not runs:
-            sandbox_root = repo / ".repopilot" / "sandbox"
+            sandbox_root = repo / ".repopilot" / f"sandbox_r{repair_round}_empty"
             runs.append(
                 {
                     "stage": "apply_patch",
@@ -2192,6 +2192,18 @@ index 0000000..1111111
             for item in runs:
                 item["portfolio_summary"] = portfolio_summary
         return runs
+
+    def _safe_rmtree(self, path: Path) -> None:
+        def _onerror(func, target, exc_info):
+            if isinstance(exc_info[1], FileNotFoundError):
+                return
+            try:
+                os.chmod(target, 0o700)
+                func(target)
+            except Exception:
+                raise exc_info[1]
+
+        shutil.rmtree(path, onerror=_onerror)
 
     def _apply_patch_to_worktree(
         self,
