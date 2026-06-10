@@ -208,6 +208,12 @@ Baseline comparison:
 .\.venv\Scripts\python.exe run_benchmark.py --use-llm --require-llm --run-tests --apply-sandbox --compare-baseline
 ```
 
+Single-candidate vs multi-candidate patch generation comparison:
+
+```powershell
+.\.venv\Scripts\python.exe run_benchmark.py --run-tests --apply-sandbox --compare-multi-candidate
+```
+
 SWE-bench style evaluation:
 
 ```powershell
