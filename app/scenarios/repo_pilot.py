@@ -607,8 +607,16 @@ class RepoPilotWorkflow:
         task.add_trace("scenario", "start", scenario="repo_pilot", repo=str(repo))
         memory_store = MemoryStore(repo / ".repopilot" / "memory.sqlite3")
         memory_hits = memory_store.search(issue, repo_path=str(repo), top_k=3) if use_memory else []
+        learned_repair_policy = self._learn_from_memory_hits(memory_hits)
         if memory_hits:
             task.add_trace("memory_store", "recall", hits=len(memory_hits))
+        if learned_repair_policy.get("summary_lines"):
+            task.add_trace(
+                "repair_memory",
+                "learn",
+                families=len(learned_repair_policy.get("family_stats", {})),
+                strategies=len(learned_repair_policy.get("strategy_stats", {})),
+            )
 
         indexer = RepoIndexer(repo)
         chunks = indexer.build()
@@ -631,8 +639,12 @@ class RepoPilotWorkflow:
         root_cause = self._root_cause(issue, evidence)
         if memory_hits:
             root_cause = root_cause + "\n\n历史相似案例提示:\n" + self._format_memory_hits(memory_hits)
+        if learned_repair_policy.get("summary_lines"):
+            root_cause = root_cause + "\n\n历史修复策略提示:\n" + "\n".join(learned_repair_policy["summary_lines"])
         if self.root_cause_agent:
             memory_context = "\n\nMemory context:\n" + self._format_memory_hits(memory_hits) if memory_hits else ""
+            if learned_repair_policy.get("summary_lines"):
+                memory_context += "\n\nRepair policy context:\n" + "\n".join(learned_repair_policy["summary_lines"])
             root_cause = self.root_cause_agent.run(issue + memory_context, evidence)
             task.add_trace("root_cause_llm_agent", "finish", model="openai_compatible")
         change_plan = self._change_plan(issue, evidence, root_cause)
@@ -674,6 +686,7 @@ class RepoPilotWorkflow:
                 patch_suggestions=patch_suggestions,
                 patch_checks=patch_checks,
                 max_rounds=3,
+                learned_repair_policy=learned_repair_policy,
             )
         if apply_worktree:
             worktree_runs = self._apply_patch_to_worktree(repo, patch_checks, sandbox_runs)
@@ -742,6 +755,7 @@ class RepoPilotWorkflow:
             "vector_backend": retriever.vector_store.backend,
             "embedding_provider": retriever.embedding_provider,
             "memory_hits": memory_hits,
+            "learned_repair_policy": learned_repair_policy,
         }
         task.report = self._report(task, repo, issue)
         self._judge(task)
@@ -1472,6 +1486,7 @@ index 0000000..1111111
         patch_suggestions: list[dict[str, str]],
         patch_checks: list[dict[str, Any]],
         max_rounds: int = 3,
+        learned_repair_policy: dict[str, Any] | None = None,
     ) -> tuple[list[dict[str, str]], list[dict[str, Any]], list[dict[str, Any]]]:
         all_runs: list[dict[str, Any]] = []
         current_issue = issue
@@ -1527,6 +1542,7 @@ index 0000000..1111111
                 parsed_failures=parsed_failures,
                 round_plan=round_plan,
                 round_id=round_id,
+                learned_repair_policy=learned_repair_policy or {},
             )
             if self.patch_suggestion_agent:
                 current_suggestions = self.patch_suggestion_agent.run(current_issue, root_cause, evidence)
@@ -1561,6 +1577,7 @@ index 0000000..1111111
         parsed_failures: list[Any],
         round_plan: dict[str, Any],
         round_id: int,
+        learned_repair_policy: dict[str, Any],
     ) -> str:
         issue = self._patch_issue_with_failure_context(base_issue, sandbox_runs, round_id)
         if parsed_failures:
@@ -1577,6 +1594,8 @@ index 0000000..1111111
             "- constraints: prefer the smallest diff, preserve behavior, avoid touching unrelated files\n"
             "- output: return a strict unified diff without markdown fences\n"
         )
+        if learned_repair_policy.get("summary_lines"):
+            issue += "\nHistorical repair learning:\n" + "\n".join(learned_repair_policy["summary_lines"])
         return issue
 
     def _repair_journal(self, sandbox_runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1598,6 +1617,47 @@ index 0000000..1111111
                 }
             )
         return journal
+
+    def _learn_from_memory_hits(self, memory_hits: list[dict[str, Any]]) -> dict[str, Any]:
+        family_stats: dict[str, dict[str, int]] = {}
+        strategy_stats: dict[str, dict[str, int]] = {}
+        family_strategy_stats: dict[str, dict[str, dict[str, int]]] = {}
+        for item in memory_hits:
+            payload = item.get("payload", {}) or {}
+            journal = payload.get("repair_journal", []) or []
+            evaluation = payload.get("evaluation", {}) or {}
+            outcome = "passed" if evaluation.get("passed") else "failed"
+            for entry in journal:
+                family = str(entry.get("primary_family", "") or "unknown")
+                strategy = str(entry.get("strategy", "") or "unknown")
+                family_row = family_stats.setdefault(family, {"passed": 0, "failed": 0})
+                family_row[outcome] = family_row.get(outcome, 0) + 1
+                strategy_row = strategy_stats.setdefault(strategy, {"passed": 0, "failed": 0})
+                strategy_row[outcome] = strategy_row.get(outcome, 0) + 1
+                family_strategy_row = family_strategy_stats.setdefault(family, {}).setdefault(
+                    strategy,
+                    {"passed": 0, "failed": 0},
+                )
+                family_strategy_row[outcome] = family_strategy_row.get(outcome, 0) + 1
+        recommendations: list[str] = []
+        for family, stats in sorted(family_stats.items()):
+            best_strategy = ""
+            best_passed = -1
+            for strategy, strategy_stat in family_strategy_stats.get(family, {}).items():
+                if strategy == "unknown":
+                    continue
+                if strategy_stat.get("passed", 0) > best_passed:
+                    best_passed = strategy_stat.get("passed", 0)
+                    best_strategy = strategy
+            recommendations.append(
+                f"- family={family} historical_passed={stats.get('passed',0)} historical_failed={stats.get('failed',0)} preferred_strategy={best_strategy or 'narrow_scope_and_preserve_behavior'}"
+            )
+        return {
+            "family_stats": family_stats,
+            "strategy_stats": strategy_stats,
+            "family_strategy_stats": family_strategy_stats,
+            "summary_lines": recommendations[:6],
+        }
 
     def _collect_failure_signals(
         self,
