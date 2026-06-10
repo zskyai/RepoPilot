@@ -42,6 +42,12 @@ To compare single-candidate patch generation against the new multi-candidate por
 .\.venv\Scripts\python.exe run_benchmark.py --run-tests --apply-sandbox --compare-multi-candidate
 ```
 
+To compare no-graph retrieval against the new graph-enhanced rerank and impact prediction mode:
+
+```powershell
+.\.venv\Scripts\python.exe run_benchmark.py --run-tests --apply-sandbox --compare-graph-ablation
+```
+
 To run the SWE-bench style evaluator:
 
 ```powershell
