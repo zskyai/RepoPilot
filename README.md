@@ -61,6 +61,28 @@ Recent local validation on this project:
 - SWE-style runner smoke: `pass_at_1 = 1.0`
 - GitHub CI on PR branch: passed
 
+## Public Benchmark Snapshot
+
+Latest stable self-hosted SWE-style snapshot:
+
+- `case_count = 8`
+- `pass_at_1 = 1.0`
+- `average_elapsed_seconds = 40.9`
+- coverage includes retrieval, approval gates, repair signals, memory, trace store, GitHub workflow discovery, and dashboard operator paths
+
+Latest representative real-repo case:
+
+- repository: `python-slugify`
+- task: contributor-facing README improvement and test-entry guidance
+- overall score: `0.922`
+- `patch_apply_check = 1.0`
+- localized files: `README.md`, `CHANGELOG.md`, `setup.py`
+
+See:
+
+- `docs/benchmark.md`
+- `docs/case_studies.md`
+
 ## Quick Start
 
 ### 1. Install
@@ -244,6 +266,7 @@ See:
 
 - `docs/architecture.md`
 - `docs/benchmark.md`
+- `docs/case_studies.md`
 - `docs/github_integration.md`
 - `docs/memory.md`
 
