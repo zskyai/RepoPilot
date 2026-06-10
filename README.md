@@ -26,6 +26,7 @@ The current implementation includes:
 
 - Tree-sitter code knowledge graph
 - Qdrant dense + sparse hybrid retrieval with RRF fusion
+- GraphRAG-style retrieval with graph propagation rerank
 - LangGraph-style execution with persistent traces
 - approval gates before worktree or GitHub mutation
 - structured repair signals from `pytest`, `git apply`, and GitHub CI
@@ -38,6 +39,7 @@ The current implementation includes:
 - Tree-sitter code knowledge graph for Python, JavaScript, TypeScript, and TSX
 - Qdrant-backed hybrid retrieval: lexical, dense vector, symbol/call/import, and rerank scoring
 - Qdrant dense + sparse hybrid retrieval with RRF fusion
+- Impacted-file prediction from code graph subgraphs
 - Sandbox patch apply and test execution
 - Worktree patch apply with guardrails
 - GitHub PR, CI, and PR comment integration
@@ -48,6 +50,8 @@ The current implementation includes:
 - SWE-bench style runner in `run_swe_bench_style.py`
 - Benchmark runner with stable multi-case evaluation
 - FastAPI dashboard for interactive runs
+- Execution-unit-driven multi-candidate patch generation
+- Coordinated patch portfolio selection with closed-loop preference
 
 ## Validated Results
 
@@ -60,6 +64,29 @@ Recent local validation on this project:
 - approval gate smoke: passed
 - SWE-style runner smoke: `pass_at_1 = 1.0`
 - GitHub CI on PR branch: passed
+
+## Public Benchmark Snapshot
+
+Latest stable self-hosted SWE-style snapshot:
+
+- `case_count = 8`
+- `pass_rate = 1.0`
+- `average_overall = 0.865`
+- `average_elapsed_seconds = 40.1`
+- coverage includes retrieval, approval gates, repair signals, memory, trace store, GitHub workflow discovery, and dashboard operator paths
+
+Latest representative real-repo case:
+
+- repository: `python-slugify`
+- task: contributor-facing README improvement and test-entry guidance
+- overall score: `0.836`
+- `patch_apply_check = 1.0`
+- localized files: `README.md`, `test.py`
+
+See:
+
+- `docs/benchmark.md`
+- `docs/case_studies.md`
 
 ## Quick Start
 
@@ -184,10 +211,22 @@ Baseline comparison:
 .\.venv\Scripts\python.exe run_benchmark.py --use-llm --require-llm --run-tests --apply-sandbox --compare-baseline
 ```
 
+Single-candidate vs multi-candidate patch generation comparison:
+
+```powershell
+.\.venv\Scripts\python.exe run_benchmark.py --run-tests --apply-sandbox --compare-multi-candidate
+```
+
+No-graph vs graph-enhanced retrieval comparison:
+
+```powershell
+.\.venv\Scripts\python.exe run_benchmark.py --run-tests --apply-sandbox --compare-graph-ablation
+```
+
 SWE-bench style evaluation:
 
 ```powershell
-.\.venv\Scripts\python.exe run_swe_bench_style.py --cases benchmarks\swe_style_cases.json --work-dir .repopilot\swe_runs --max-cases 5
+.\.venv\Scripts\python.exe run_swe_bench_style.py --cases benchmarks\swe_style_cases.json --work-dir .repopilot\swe_runs --max-cases 8
 ```
 
 The runner reports:
@@ -198,6 +237,24 @@ The runner reports:
 - `saved_run_id`
 - `graph_run_id`
 - `trace_db_path`
+- `markdown_table`
+
+Current local SWE-style suite contains 8 self-hosted cases for:
+
+- retrieval and graph localization
+- approval gate behavior
+- repair signal parsing
+- SWE-style runner behavior
+- GitHub workflow discovery
+- memory store discovery
+- persistent trace and checkpoint discovery
+- dashboard and operator controls
+
+To inspect persisted checkpoints for a graph run:
+
+```powershell
+.\.venv\Scripts\python.exe run_approval.py --repo . --checkpoints "<graph_run_id>"
+```
 
 ## Architecture
 
@@ -226,6 +283,7 @@ See:
 
 - `docs/architecture.md`
 - `docs/benchmark.md`
+- `docs/case_studies.md`
 - `docs/github_integration.md`
 - `docs/memory.md`
 
