@@ -252,24 +252,41 @@ class PatchSuggestionAgent(LLMRepoAgent):
         implementation_blueprint: dict[str, Any] | None = None,
     ) -> list[dict[str, str]]:
         text = self.ask(
-            "You are a senior coding agent. Propose one safe patch suggestion. "
-            "Return JSON only with keys: title, target_file, reason, diff. "
-            "The diff value must be unified-diff style and must not include markdown fences. "
-            "Prefer documentation/test patch if code change is risky.\n\n"
+            "You are a senior coding agent. Propose 2 to 3 safe patch suggestions. "
+            "Return JSON only with key `patches`, where `patches` is a list of objects with keys: title, target_file, reason, diff. "
+            "Each diff must be unified-diff style and must not include markdown fences. "
+            "Prefer a diverse candidate set: minimal implementation fix, coordinated multi-file fix, and test/doc oriented fallback when code change is risky.\n\n"
             f"Issue:\n{issue}\n\nIntent:\n{json.dumps(intent_packet or {}, ensure_ascii=False)}\n\n"
             f"Blueprint:\n{json.dumps(implementation_blueprint or {}, ensure_ascii=False)}\n\n"
             f"Root cause:\n{root_cause}\n\nEvidence:\n{evidence_brief(evidence)}"
         )
         data = parse_json_object(text)
         if data:
-            return [
-                {
-                    "title": str(data.get("title") or "LLM generated patch suggestion"),
-                    "target_file": str(data.get("target_file") or "UNKNOWN"),
-                    "reason": str(data.get("reason") or ""),
-                    "diff": clean_unified_diff(str(data.get("diff") or "")),
-                }
-            ]
+            patches = data.get("patches")
+            if isinstance(patches, list) and patches:
+                normalized = []
+                for item in patches[:3]:
+                    if not isinstance(item, dict):
+                        continue
+                    normalized.append(
+                        {
+                            "title": str(item.get("title") or "LLM generated patch suggestion"),
+                            "target_file": str(item.get("target_file") or "UNKNOWN"),
+                            "reason": str(item.get("reason") or ""),
+                            "diff": clean_unified_diff(str(item.get("diff") or "")),
+                        }
+                    )
+                if normalized:
+                    return normalized
+            if "diff" in data:
+                return [
+                    {
+                        "title": str(data.get("title") or "LLM generated patch suggestion"),
+                        "target_file": str(data.get("target_file") or "UNKNOWN"),
+                        "reason": str(data.get("reason") or ""),
+                        "diff": clean_unified_diff(str(data.get("diff") or "")),
+                    }
+                ]
         suggestion = self._parse_patch_text(text)
         suggestion["diff"] = clean_unified_diff(suggestion["diff"])
         return [suggestion]
@@ -805,7 +822,14 @@ class RepoPilotWorkflow:
         execution_units = self._execution_units(implementation_blueprint, coordination_waves)
         acceptance_bundle = self._acceptance_bundle(intent_packet, implementation_blueprint, atomic_change_bundle)
         risk_items = self._risk_review(issue, suspected_files)
-        patch_suggestions = self._patch_suggestions(issue, suspected_files, root_cause)
+        patch_suggestions = self._patch_suggestions(
+            issue,
+            suspected_files,
+            root_cause,
+            implementation_blueprint=implementation_blueprint,
+            execution_units=execution_units,
+            acceptance_bundle=acceptance_bundle,
+        )
         if self.patch_suggestion_agent:
             patch_suggestions = self.patch_suggestion_agent.run(
                 issue,
@@ -814,10 +838,24 @@ class RepoPilotWorkflow:
                 intent_packet=intent_packet,
                 implementation_blueprint=implementation_blueprint,
             )
+            patch_suggestions.extend(
+                self._execution_unit_patch_candidates(
+                    implementation_blueprint,
+                    execution_units,
+                    acceptance_bundle,
+                )
+            )
             task.add_trace("patch_suggestion_llm_agent", "finish", suggestions=len(patch_suggestions))
         patch_checks = self._check_patches(repo, patch_suggestions, coordination_plan=coordination_plan)
         if patch_suggestions and not any(item.get("passed") for item in patch_checks):
-            fallback = self._patch_suggestions(issue, suspected_files, root_cause)
+            fallback = self._patch_suggestions(
+                issue,
+                suspected_files,
+                root_cause,
+                implementation_blueprint=implementation_blueprint,
+                execution_units=execution_units,
+                acceptance_bundle=acceptance_bundle,
+            )
             patch_suggestions = fallback
             patch_checks = self._check_patches(repo, patch_suggestions, coordination_plan=coordination_plan)
             task.add_trace(
@@ -1519,7 +1557,13 @@ index 0000000..1111111
         return suggestions
 
     def _patch_suggestions(
-        self, issue: str, suspected_files: list[str], root_cause: str
+        self,
+        issue: str,
+        suspected_files: list[str],
+        root_cause: str,
+        implementation_blueprint: dict[str, Any] | None = None,
+        execution_units: list[dict[str, Any]] | None = None,
+        acceptance_bundle: dict[str, Any] | None = None,
     ) -> list[dict[str, str]]:
         text = issue.lower()
         suggestions: list[dict[str, str]] = []
@@ -1622,7 +1666,14 @@ index 0000000..1111111
 +    # TODO: encode the failing behavior around {target}
 +    assert True
 """,
-                }
+                    }
+                )
+            suggestions.extend(
+                self._execution_unit_patch_candidates(
+                    implementation_blueprint or {},
+                    execution_units or [],
+                    acceptance_bundle or {},
+                )
             )
         return suggestions
 
@@ -1650,6 +1701,58 @@ index 0000000..1111111
             + "\nFailure context:\n"
             + "\n\n".join(failure_logs)
         )
+
+    def _execution_unit_patch_candidates(
+        self,
+        implementation_blueprint: dict[str, Any],
+        execution_units: list[dict[str, Any]],
+        acceptance_bundle: dict[str, Any],
+    ) -> list[dict[str, str]]:
+        candidates: list[dict[str, str]] = []
+        if not execution_units:
+            return candidates
+        primary_unit = next((unit for unit in execution_units if "primary" in (unit.get("roles") or [])), execution_units[0])
+        primary_files = [str(path) for path in (primary_unit.get("files") or []) if str(path).endswith((".py", ".ts", ".tsx", ".js"))]
+        if primary_files:
+            target = primary_files[0]
+            candidates.append(
+                {
+                    "title": f"Execution-unit implementation candidate for {target}",
+                    "target_file": target,
+                    "reason": implementation_blueprint.get("feature_slice", "Implementation-oriented candidate generated from execution units."),
+                    "diff": (
+                        f"diff --git a/{target} b/{target}\n"
+                        f"--- a/{target}\n"
+                        f"+++ b/{target}\n"
+                        "@@ -1,3 +1,7 @@\n"
+                        "+# RepoPilot execution-unit candidate\n"
+                        "+# Goal: "
+                        + str(primary_unit.get("goal", ""))[:100].replace("\n", " ")
+                        + "\n"
+                    ),
+                }
+            )
+        required_tests = [str(path) for path in (acceptance_bundle.get("required_test_files") or []) if str(path)]
+        if required_tests:
+            test_target = required_tests[0]
+            candidates.append(
+                {
+                    "title": f"Acceptance-bundle test candidate for {test_target}",
+                    "target_file": test_target,
+                    "reason": "Acceptance bundle indicates the fix should be backed by an explicit regression or contract test.",
+                    "diff": (
+                        f"diff --git a/{test_target} b/{test_target}\n"
+                        f"--- a/{test_target}\n"
+                        f"+++ b/{test_target}\n"
+                        "@@ -1,3 +1,7 @@\n"
+                        "+# RepoPilot acceptance candidate\n"
+                        "+# Verification: "
+                        + ", ".join(str(item) for item in (acceptance_bundle.get("acceptance_criteria") or [])[:2])
+                        + "\n"
+                    ),
+                }
+            )
+        return candidates[:2]
 
     def _run_tests(self, repo: Path, test_plan: list[str]) -> list[dict[str, Any]]:
         commands = self._test_commands(repo, test_plan)
