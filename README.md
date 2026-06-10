@@ -187,7 +187,7 @@ Baseline comparison:
 SWE-bench style evaluation:
 
 ```powershell
-.\.venv\Scripts\python.exe run_swe_bench_style.py --cases benchmarks\swe_style_cases.json --work-dir .repopilot\swe_runs --max-cases 5
+.\.venv\Scripts\python.exe run_swe_bench_style.py --cases benchmarks\swe_style_cases.json --work-dir .repopilot\swe_runs --max-cases 8
 ```
 
 The runner reports:
@@ -198,6 +198,24 @@ The runner reports:
 - `saved_run_id`
 - `graph_run_id`
 - `trace_db_path`
+- `markdown_table`
+
+Current local SWE-style suite contains 8 self-hosted cases for:
+
+- retrieval and graph localization
+- approval gate behavior
+- repair signal parsing
+- SWE-style runner behavior
+- GitHub workflow discovery
+- memory store discovery
+- persistent trace and checkpoint discovery
+- dashboard and operator controls
+
+To inspect persisted checkpoints for a graph run:
+
+```powershell
+.\.venv\Scripts\python.exe run_approval.py --repo . --checkpoints "<graph_run_id>"
+```
 
 ## Architecture
 
