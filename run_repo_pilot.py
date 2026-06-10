@@ -31,11 +31,14 @@ def main() -> None:
     parser.add_argument("--create-pr", action="store_true", help="Create a GitHub pull request with gh CLI.")
     parser.add_argument("--poll-ci", action="store_true", help="Fetch CI checks for the active PR with gh CLI.")
     parser.add_argument("--ci-feedback", action="store_true", help="Fetch structured CI failure feedback for repair loops.")
+    parser.add_argument("--auto-repair-ci", action="store_true", help="If CI feedback shows failed checks, auto-generate a repair comment and attach failure signals.")
+    parser.add_argument("--auto-sync-repair", action="store_true", help="If CI auto-repair produces a validated patch, sync it back to the PR branch via GitHub API.")
     parser.add_argument("--no-memory", action="store_true", help="Disable retrieval from RepoPilot long-term memory.")
     parser.add_argument("--no-save-memory", action="store_true", help="Disable saving this run into RepoPilot long-term memory.")
     parser.add_argument("--pr-number", type=int, default=None, help="Existing PR number for CI polling or commenting.")
     parser.add_argument("--comment-body", default="", help="Write a comment back to the PR with gh CLI.")
     parser.add_argument("--no-approval", action="store_true", help="Disable human approval gates for mutation actions.")
+    parser.add_argument("--resume-run-id", default="", help="Resume a graph thread id / run id from the latest checkpoint metadata.")
     parser.add_argument("--save-run", action="store_true", help="Persist run payload to .repopilot/runs.sqlite3.")
     args = parser.parse_args()
 
@@ -47,6 +50,8 @@ def main() -> None:
         "create_pr": args.create_pr,
         "poll_ci": args.poll_ci,
         "ci_feedback": args.ci_feedback,
+        "auto_repair_ci": args.auto_repair_ci,
+        "auto_sync_repair": args.auto_sync_repair,
         "use_memory": not args.no_memory,
         "save_memory": not args.no_save_memory,
         "pr_number": args.pr_number,
@@ -54,6 +59,7 @@ def main() -> None:
     }
     if args.graph:
         run_kwargs["require_approval"] = not args.no_approval
+        run_kwargs["resume_run_id"] = args.resume_run_id
     result = workflow_cls(use_llm=args.use_llm, require_llm=args.require_llm).run(
         Path(args.repo),
         args.issue,
