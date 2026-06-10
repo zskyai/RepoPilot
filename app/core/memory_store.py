@@ -145,5 +145,6 @@ class MemoryStore:
             "change_plan": analysis.get("change_plan", []),
             "patch_suggestions": analysis.get("patch_suggestions", [])[:3],
             "patch_checks": analysis.get("patch_checks", [])[:5],
+            "repair_journal": analysis.get("repair_journal", [])[:8],
             "github": (payload.get("pr_plan") or {}).get("github", {}),
         }
