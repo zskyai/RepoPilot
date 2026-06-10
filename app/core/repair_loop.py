@@ -25,6 +25,8 @@ class PatchCandidateScore:
     touched_files: list[str] = field(default_factory=list)
     changed_lines: int = 0
     failure_penalty: int = 0
+    coordination_score: float = 0.0
+    sandbox_pass_count: int = 0
     score: float = 0.0
     reason: str = ""
 
@@ -258,19 +260,30 @@ class PatchSelector:
         related_runs = [item for item in sandbox_runs if item.get("patch_file") == patch_file]
         changed_lines = self._changed_lines(patch_file)
         failures = sum(1 for item in related_runs if not item.get("passed"))
+        sandbox_pass_count = sum(1 for item in related_runs if item.get("passed"))
         touched_files = patch_check.get("touched_files", [])
+        coordination = patch_check.get("coordination_assessment") or {}
+        coordination_score = float(coordination.get("score", 0.0) or 0.0)
         overlap_bonus = self._failure_overlap_bonus(touched_files, failure_signals)
         touched_penalty = max(0.0, (len(touched_files) - 2) * 1.5)
         hunk_penalty = max(0.0, (self._hunk_count(patch_file) - 1) * 1.25)
+        missing_primary_penalty = len(coordination.get("missing_primary_files", []) or []) * 2.5
+        missing_test_penalty = len(coordination.get("missing_test_files", []) or []) * 1.5
+        closed_loop_bonus = 4.0 if coordination.get("complete") else 0.0
         passed = bool(patch_check.get("passed")) and (not related_runs or all(item.get("passed") for item in related_runs))
         score = 0.0
         score += 10.0 if patch_check.get("passed") else -5.0
         score += 20.0 if passed else 0.0
+        score += min(8.0, coordination_score * 8.0)
+        score += sandbox_pass_count * 1.5
+        score += closed_loop_bonus
         score -= min(10.0, changed_lines * 0.05)
         score -= failures * 3.0
         score += overlap_bonus
         score -= touched_penalty
         score -= hunk_penalty
+        score -= missing_primary_penalty
+        score -= missing_test_penalty
         return PatchCandidateScore(
             title=patch_check.get("title", ""),
             patch_file=patch_file,
@@ -278,8 +291,10 @@ class PatchSelector:
             touched_files=touched_files,
             changed_lines=changed_lines,
             failure_penalty=failures,
+            coordination_score=coordination_score,
+            sandbox_pass_count=sandbox_pass_count,
             score=round(score, 3),
-            reason="prefer verified patches that stay small and overlap with failure locations",
+            reason="prefer verified, closed-loop patches that stay small, cover coordinated files, and overlap with failure locations",
         )
 
     def _changed_lines(self, patch_file: str) -> int:
