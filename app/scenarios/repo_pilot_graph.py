@@ -50,11 +50,14 @@ class RepoPilotGraphWorkflow:
         create_pr: bool = False,
         poll_ci: bool = False,
         ci_feedback: bool = False,
+        auto_repair_ci: bool = False,
+        auto_sync_repair: bool = False,
         use_memory: bool = True,
         save_memory: bool = True,
         pr_number: int | None = None,
         comment_body: str = "",
         require_approval: bool = True,
+        resume_run_id: str = "",
     ) -> RepoDiagnosisResult:
         repo = Path(repo_path).resolve()
         configured_trace_db = os.getenv("REPOPILOT_TRACE_DB", "").strip()
@@ -62,7 +65,8 @@ class RepoPilotGraphWorkflow:
         if not trace_db_path.is_absolute():
             trace_db_path = repo / trace_db_path
         approval_db_path = repo / ".repopilot" / "approvals.sqlite3"
-        graph_run_id = str(uuid4())
+        graph_run_id = resume_run_id or str(uuid4())
+        graph_thread_id = f"repopilot:{repo.name}:{graph_run_id}"
         approval_gate = self._approval_gate(
             approval_db_path=approval_db_path,
             graph_run_id=graph_run_id,
@@ -83,6 +87,8 @@ class RepoPilotGraphWorkflow:
                 "create_pr": create_pr,
                 "poll_ci": poll_ci,
                 "ci_feedback": ci_feedback,
+                "auto_repair_ci": auto_repair_ci,
+                "auto_sync_repair": auto_sync_repair,
                 "use_memory": use_memory,
                 "save_memory": save_memory,
                 "pr_number": pr_number,
@@ -90,9 +96,11 @@ class RepoPilotGraphWorkflow:
                 "repair_round": 0,
                 "graph_trace": [],
                 "graph_run_id": graph_run_id,
+                "graph_thread_id": graph_thread_id,
                 "trace_db_path": str(trace_db_path),
                 "approval_db_path": str(approval_db_path),
                 "approval_gate": approval_gate,
+                "resume_run_id": resume_run_id,
             }
         }
         final = self.graph.invoke(state) if hasattr(self.graph, "invoke") else self.graph.run(state)
@@ -105,8 +113,11 @@ class RepoPilotGraphWorkflow:
         )
         result.task.analysis["graph_trace"] = payload.get("graph_trace", [])
         result.task.analysis["graph_run_id"] = payload.get("graph_run_id")
+        result.task.analysis["graph_thread_id"] = payload.get("graph_thread_id")
         result.task.analysis["trace_db_path"] = payload.get("trace_db_path")
         result.task.analysis["approval_gate"] = payload.get("approval_gate")
+        result.task.analysis["resumed_from_checkpoint"] = bool(payload.get("resume_run_id"))
+        result.task.analysis["checkpoint_state"] = self._approval_store(payload).latest_checkpoint(payload.get("graph_run_id", ""))
         result.task.analysis["persistent_trace"] = self._trace_store(payload).read_run(payload.get("graph_run_id", ""))
         result.task.analysis["repair_rounds"] = payload.get("repair_round", 0)
         result.task.add_trace("state_graph", "finish", nodes=[item["node"] for item in payload.get("graph_trace", [])])
@@ -171,6 +182,8 @@ class RepoPilotGraphWorkflow:
                 create_pr=payload.get("create_pr", False),
                 poll_ci=payload.get("poll_ci", False),
                 ci_feedback=payload.get("ci_feedback", False),
+                auto_repair_ci=payload.get("auto_repair_ci", False),
+                auto_sync_repair=payload.get("auto_sync_repair", False),
                 use_memory=payload.get("use_memory", True),
                 save_memory=payload.get("save_memory", True),
                 pr_number=payload.get("pr_number"),
