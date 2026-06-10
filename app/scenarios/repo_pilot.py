@@ -1239,10 +1239,20 @@ index 0000000..1111111
             expanded.append(item)
             diff = clean_unified_diff(item.get("diff", ""))
             targets = self._extract_patch_targets(diff)
+            file_hunks = self._split_unified_diff_by_file(diff)
             if len(targets) <= 1:
+                for path, partial_diff in file_hunks.items():
+                    for hunk_idx, hunk_diff in enumerate(self._split_single_file_diff_by_hunk(partial_diff), start=1):
+                        expanded.append(
+                            {
+                                "title": f"{item.get('title', 'patch')} [hunk:{path}#{hunk_idx}]",
+                                "target_file": path,
+                                "reason": f"Hunk-focused variant extracted for minimal safe apply: {path}#{hunk_idx}",
+                                "diff": hunk_diff,
+                            }
+                        )
                 continue
-            hunks = self._split_unified_diff_by_file(diff)
-            for path, partial_diff in hunks.items():
+            for path, partial_diff in file_hunks.items():
                 expanded.append(
                     {
                         "title": f"{item.get('title', 'patch')} [focused:{path}]",
@@ -1251,6 +1261,15 @@ index 0000000..1111111
                         "diff": partial_diff,
                     }
                 )
+                for hunk_idx, hunk_diff in enumerate(self._split_single_file_diff_by_hunk(partial_diff), start=1):
+                    expanded.append(
+                        {
+                            "title": f"{item.get('title', 'patch')} [hunk:{path}#{hunk_idx}]",
+                            "target_file": path,
+                            "reason": f"Hunk-focused variant extracted for minimal safe apply: {path}#{hunk_idx}",
+                            "diff": hunk_diff,
+                        }
+                    )
         return expanded
 
     def _check_patches(self, repo: Path, patch_suggestions: list[dict[str, str]]) -> list[dict[str, Any]]:
@@ -1324,6 +1343,27 @@ index 0000000..1111111
         if current_path and current_lines:
             files[current_path] = current_lines[:]
         return {path: "\n".join(lines) + "\n" for path, lines in files.items()}
+
+    def _split_single_file_diff_by_hunk(self, diff: str) -> list[str]:
+        lines = diff.splitlines()
+        header: list[str] = []
+        hunks: list[list[str]] = []
+        current_hunk: list[str] = []
+        for line in lines:
+            if line.startswith("@@"):
+                if current_hunk:
+                    hunks.append(current_hunk[:])
+                current_hunk = [line]
+                continue
+            if current_hunk:
+                current_hunk.append(line)
+            else:
+                header.append(line)
+        if current_hunk:
+            hunks.append(current_hunk[:])
+        if len(hunks) <= 1:
+            return []
+        return ["\n".join(header + hunk) + "\n" for hunk in hunks]
 
     def _extract_patch_targets(self, diff: str) -> list[str]:
         targets: list[str] = []
