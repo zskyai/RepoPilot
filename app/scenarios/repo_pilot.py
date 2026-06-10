@@ -677,6 +677,7 @@ class RepoPilotWorkflow:
         )
 
         suspected_files = self._suspected_files(evidence)
+        coordination_plan = self._multi_file_coordination_plan(evidence, code_graph)
         root_cause = self._root_cause(issue, evidence)
         if memory_hits:
             root_cause = root_cause + "\n\n历史相似案例提示:\n" + self._format_memory_hits(memory_hits)
@@ -777,6 +778,7 @@ class RepoPilotWorkflow:
         task.analysis = {
             "root_cause_hypothesis": root_cause,
             "suspected_files": suspected_files,
+            "coordination_plan": coordination_plan,
             "change_plan": change_plan,
             "test_plan": test_plan,
             "risk_items": risk_items,
@@ -892,6 +894,50 @@ class RepoPilotWorkflow:
             if path and path not in files:
                 files.append(path)
         return files[:6]
+
+    def _multi_file_coordination_plan(self, evidence: list[Evidence], code_graph: CodeGraph) -> list[dict[str, Any]]:
+        if not evidence:
+            return []
+        seen: set[str] = set()
+        plan: list[dict[str, Any]] = []
+        for item in evidence[:6]:
+            path = item.metadata.get("path", "")
+            if not path or path in seen:
+                continue
+            seen.add(path)
+            graph_context = item.metadata.get("graph_context", {}) or {}
+            related_files: list[str] = []
+            for other in evidence[:10]:
+                other_path = other.metadata.get("path", "")
+                if not other_path or other_path == path:
+                    continue
+                other_symbols = set(other.metadata.get("symbols", []) or [])
+                local_calls = set(item.metadata.get("calls", []) or [])
+                if other_path in related_files:
+                    continue
+                if other_symbols & local_calls:
+                    related_files.append(other_path)
+                    continue
+                imports = " ".join(graph_context.get("imports", []) or [])
+                if other_path.replace("\\", "/").split("/")[-1].split(".")[0] in imports:
+                    related_files.append(other_path)
+            normalized_path = path.replace("\\", "/")
+            role = "primary"
+            if normalized_path.endswith(("test.py", "_test.py")) or "tests/" in normalized_path:
+                role = "test"
+            elif normalized_path.endswith((".md", ".yml", ".yaml", ".toml", ".json")):
+                role = "support"
+            plan.append(
+                {
+                    "path": path,
+                    "role": role,
+                    "symbols": item.metadata.get("symbols", [])[:8],
+                    "calls": item.metadata.get("calls", [])[:8],
+                    "related_files": related_files[:5],
+                    "language": graph_context.get("language", ""),
+                }
+            )
+        return plan
 
     def _root_cause(self, issue: str, evidence: list[Evidence]) -> str:
         text = issue.lower()
@@ -1287,6 +1333,7 @@ index 0000000..1111111
                 "patch_file": str(patch_file),
                 "target_file": suggestion.get("target_file", ""),
                 "touched_files": touched_files,
+                "coordination_group": self._coordination_group(touched_files),
                 "apply_check": "skipped",
                 "passed": False,
                 "stderr": "",
@@ -1317,6 +1364,18 @@ index 0000000..1111111
                 check["stderr"] = "Patch is not unified diff style."
             checks.append(check)
         return checks
+
+    def _coordination_group(self, touched_files: list[str]) -> dict[str, Any]:
+        normalized = [path.replace("\\", "/") for path in touched_files]
+        tests = [path for path in normalized if "tests/" in path or path.endswith(("test.py", "_test.py"))]
+        primary = [path for path in normalized if path not in tests and not path.endswith((".md", ".json", ".toml", ".yml", ".yaml"))]
+        support = [path for path in normalized if path not in primary and path not in tests]
+        return {
+            "primary_files": primary[:6],
+            "test_files": tests[:6],
+            "support_files": support[:6],
+            "is_multi_file": len(normalized) > 1,
+        }
 
     def _split_unified_diff_by_file(self, diff: str) -> dict[str, str]:
         files: dict[str, list[str]] = {}
@@ -1429,6 +1488,7 @@ index 0000000..1111111
                     "repair_round": repair_round,
                     "sandbox": str(sandbox_root),
                     "patch_file": str(patch_file),
+                    "coordination_group": item.get("coordination_group", {}),
                     "returncode": apply_result.returncode,
                     "passed": apply_result.returncode == 0,
                     "stdout": apply_result.stdout[-1000:],
@@ -1443,6 +1503,7 @@ index 0000000..1111111
                     test["patch_file"] = str(patch_file)
                     test["repair_round"] = repair_round
                     test["ranking"] = item.get("ranking", {})
+                    test["coordination_group"] = item.get("coordination_group", {})
                     runs.append(test)
             candidate_runs = [entry for entry in runs if entry.get("patch_file") == str(patch_file)]
             if candidate_runs and all(entry.get("passed") for entry in candidate_runs):
