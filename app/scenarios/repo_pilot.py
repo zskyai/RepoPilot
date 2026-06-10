@@ -170,12 +170,35 @@ class RootCauseAgent(LLMRepoAgent):
         ).strip()
 
 
+class IntentAgent(LLMRepoAgent):
+    def run(self, issue: str, evidence: list[Evidence]) -> dict[str, Any]:
+        text = self.ask(
+            "You are RepoPilot IntentAgent. Understand the real engineering request behind the issue. "
+            "Return JSON only with keys: request_type, product_goal, user_visible_outcome, acceptance_criteria, constraints, "
+            "non_goals, likely_artifacts, risk_focus. Arrays must stay concise and in Chinese.\n\n"
+            f"Issue:\n{issue}\n\nEvidence:\n{evidence_brief(evidence)}"
+        )
+        data = parse_json_object(text)
+        if not data:
+            return {}
+        return {
+            "request_type": str(data.get("request_type") or "bugfix"),
+            "product_goal": str(data.get("product_goal") or ""),
+            "user_visible_outcome": str(data.get("user_visible_outcome") or ""),
+            "acceptance_criteria": [str(item) for item in (data.get("acceptance_criteria") or [])[:6]],
+            "constraints": [str(item) for item in (data.get("constraints") or [])[:6]],
+            "non_goals": [str(item) for item in (data.get("non_goals") or [])[:6]],
+            "likely_artifacts": [str(item) for item in (data.get("likely_artifacts") or [])[:6]],
+            "risk_focus": [str(item) for item in (data.get("risk_focus") or [])[:6]],
+        }
+
+
 class PatchPlannerAgent(LLMRepoAgent):
-    def run(self, issue: str, root_cause: str, evidence: list[Evidence]) -> list[str]:
+    def run(self, issue: str, root_cause: str, evidence: list[Evidence], intent_packet: dict[str, Any] | None = None) -> list[str]:
         text = self.ask(
             "Create a minimal engineering change plan in Chinese. "
             "Return JSON only: {\"steps\": [\"...\"]}. Use 4-7 steps. Mention specific files and tests.\n\n"
-            f"Issue:\n{issue}\n\nRoot cause:\n{root_cause}\n\nEvidence:\n{evidence_brief(evidence)}"
+            f"Issue:\n{issue}\n\nIntent:\n{json.dumps(intent_packet or {}, ensure_ascii=False)}\n\nRoot cause:\n{root_cause}\n\nEvidence:\n{evidence_brief(evidence)}"
         )
         data = parse_json_object(text)
         if data and isinstance(data.get("steps"), list):
@@ -184,13 +207,19 @@ class PatchPlannerAgent(LLMRepoAgent):
 
 
 class PatchSuggestionAgent(LLMRepoAgent):
-    def run(self, issue: str, root_cause: str, evidence: list[Evidence]) -> list[dict[str, str]]:
+    def run(
+        self,
+        issue: str,
+        root_cause: str,
+        evidence: list[Evidence],
+        intent_packet: dict[str, Any] | None = None,
+    ) -> list[dict[str, str]]:
         text = self.ask(
             "You are a senior coding agent. Propose one safe patch suggestion. "
             "Return JSON only with keys: title, target_file, reason, diff. "
             "The diff value must be unified-diff style and must not include markdown fences. "
             "Prefer documentation/test patch if code change is risky.\n\n"
-            f"Issue:\n{issue}\n\nRoot cause:\n{root_cause}\n\nEvidence:\n{evidence_brief(evidence)}"
+            f"Issue:\n{issue}\n\nIntent:\n{json.dumps(intent_packet or {}, ensure_ascii=False)}\n\nRoot cause:\n{root_cause}\n\nEvidence:\n{evidence_brief(evidence)}"
         )
         data = parse_json_object(text)
         if data:
@@ -584,6 +613,11 @@ class RepoPilotWorkflow:
     def __init__(self, use_llm: bool = False, require_llm: bool = False, llm: LLMClient | None = None) -> None:
         self.use_llm = use_llm
         self.llm = llm or (build_llm(require_config=require_llm) if use_llm else None)
+        self.intent_agent = IntentAgent(
+            "intent_agent",
+            "You are RepoPilot IntentAgent, extracting user intent, constraints, and acceptance criteria.",
+            self.llm,
+        ) if self.llm else None
         self.root_cause_agent = RootCauseAgent(
             "root_cause_agent",
             "You are RepoPilot RootCauseAgent, a senior software debugging agent.",
@@ -677,6 +711,12 @@ class RepoPilotWorkflow:
         )
 
         suspected_files = self._suspected_files(evidence)
+        intent_packet = self._infer_intent_packet(issue, evidence)
+        if self.intent_agent:
+            llm_intent = self.intent_agent.run(issue, evidence)
+            if llm_intent:
+                intent_packet = self._merge_intent_packet(intent_packet, llm_intent)
+                task.add_trace("intent_llm_agent", "finish", request_type=intent_packet.get("request_type", "unknown"))
         coordination_plan = self._multi_file_coordination_plan(evidence, code_graph)
         coordination_edges = self._coordination_edges(coordination_plan)
         coordination_waves = self._coordination_waves(coordination_plan, coordination_edges)
@@ -694,14 +734,14 @@ class RepoPilotWorkflow:
             task.add_trace("root_cause_llm_agent", "finish", model="openai_compatible")
         change_plan = self._change_plan(issue, evidence, root_cause)
         if self.patch_planner_agent:
-            change_plan = self.patch_planner_agent.run(issue, root_cause, evidence)
+            change_plan = self.patch_planner_agent.run(issue, root_cause, evidence, intent_packet=intent_packet)
             task.add_trace("patch_planner_llm_agent", "finish", steps=len(change_plan))
         test_plan = self._test_plan(repo, issue, suspected_files)
         atomic_change_bundle = self._atomic_change_bundle(coordination_plan, test_plan)
         risk_items = self._risk_review(issue, suspected_files)
         patch_suggestions = self._patch_suggestions(issue, suspected_files, root_cause)
         if self.patch_suggestion_agent:
-            patch_suggestions = self.patch_suggestion_agent.run(issue, root_cause, evidence)
+            patch_suggestions = self.patch_suggestion_agent.run(issue, root_cause, evidence, intent_packet=intent_packet)
             task.add_trace("patch_suggestion_llm_agent", "finish", suggestions=len(patch_suggestions))
         patch_checks = self._check_patches(repo, patch_suggestions, coordination_plan=coordination_plan)
         if patch_suggestions and not any(item.get("passed") for item in patch_checks):
@@ -780,7 +820,16 @@ class RepoPilotWorkflow:
             "生成测试计划、回归范围和风险清单",
             "用 Judge Agent 评估诊断可执行性",
         ]
+        task.plan = [
+            "理解用户真实工程意图、约束条件和验收标准",
+            "分析 issue 的触发路径、失败现象和根因假设",
+            "检索代码仓库并建立多文件协同上下文",
+            "生成最小可落地修改计划与 patch 候选",
+            "执行测试、sandbox 验证与修复闭环",
+            "评估风险、产出报告并准备 PR/CI 流程",
+        ]
         task.analysis = {
+            "intent_packet": intent_packet,
             "root_cause_hypothesis": root_cause,
             "suspected_files": suspected_files,
             "coordination_plan": coordination_plan,
@@ -802,6 +851,7 @@ class RepoPilotWorkflow:
             "repair_journal": self._repair_journal(sandbox_runs),
             "pr_plan": pr_plan,
             "brain": "real_llm_multi_agent" if self.use_llm else "rule_based_workflow",
+            "intent_engine": "llm_plus_rule_inference" if self.use_llm else "rule_inference",
             "sandbox_repair_rounds": max((item.get("repair_round", 1) for item in sandbox_runs), default=0),
             "retrieval_engine": "qdrant_hybrid_tree_sitter_rerank",
             "code_graph": code_graph.summary(),
@@ -947,6 +997,59 @@ class RepoPilotWorkflow:
                 }
             )
         return plan
+
+    def _infer_intent_packet(self, issue: str, evidence: list[Evidence]) -> dict[str, Any]:
+        text = issue.lower()
+        request_type = "bugfix"
+        if any(token in text for token in ["feature", "support", "add ", "新增", "增加", "实现"]):
+            request_type = "feature"
+        elif any(token in text for token in ["refactor", "clean", "重构", "整理"]):
+            request_type = "refactor"
+        elif any(token in text for token in ["performance", "latency", "slow", "优化性能", "提速"]):
+            request_type = "performance"
+        likely_artifacts: list[str] = []
+        acceptance: list[str] = []
+        constraints: list[str] = ["保持改动尽量小", "避免修改无关文件"]
+        risk_focus: list[str] = ["回归风险", "接口兼容性"]
+        for item in evidence[:6]:
+            path = item.metadata.get("path", "")
+            if path and path not in likely_artifacts:
+                likely_artifacts.append(path)
+            normalized = path.replace("\\", "/")
+            if "tests/" in normalized or normalized.endswith(("test.py", "_test.py")):
+                acceptance.append(f"相关测试文件 {path} 需要同步验证")
+        if "api" in text or "接口" in issue:
+            acceptance.append("对外接口行为与返回结构符合预期")
+            risk_focus.append("接口契约")
+        if "test" in text or "pytest" in text or "测试" in issue:
+            acceptance.append("相关测试能够通过")
+        if "ui" in text or "页面" in issue or "前端" in issue:
+            acceptance.append("用户可见行为与交互结果正确")
+        if request_type == "feature":
+            constraints.append("优先补齐验收路径与测试覆盖")
+        product_goal = issue.strip().splitlines()[0][:120] if issue.strip() else "解决仓库中的工程问题"
+        return {
+            "request_type": request_type,
+            "product_goal": product_goal,
+            "user_visible_outcome": acceptance[0] if acceptance else "问题被修复并可验证",
+            "acceptance_criteria": list(dict.fromkeys(acceptance))[:6] or ["核心场景可复现并验证通过"],
+            "constraints": list(dict.fromkeys(constraints))[:6],
+            "non_goals": ["不扩大无关重构", "不修改敏感配置或密钥文件"],
+            "likely_artifacts": likely_artifacts[:6],
+            "risk_focus": list(dict.fromkeys(risk_focus))[:6],
+        }
+
+    def _merge_intent_packet(self, base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+        merged = dict(base)
+        for key in ["request_type", "product_goal", "user_visible_outcome"]:
+            value = str(override.get(key) or "").strip()
+            if value:
+                merged[key] = value
+        for key in ["acceptance_criteria", "constraints", "non_goals", "likely_artifacts", "risk_focus"]:
+            combined = list(base.get(key, []) or [])
+            combined.extend(str(item) for item in (override.get(key) or []) if str(item).strip())
+            merged[key] = list(dict.fromkeys(combined))[:6]
+        return merged
 
     def _coordination_edges(self, coordination_plan: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if not coordination_plan:
