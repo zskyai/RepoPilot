@@ -216,6 +216,12 @@ Single-candidate vs multi-candidate patch generation comparison:
 .\.venv\Scripts\python.exe run_benchmark.py --run-tests --apply-sandbox --compare-multi-candidate
 ```
 
+No-graph vs graph-enhanced retrieval comparison:
+
+```powershell
+.\.venv\Scripts\python.exe run_benchmark.py --run-tests --apply-sandbox --compare-graph-ablation
+```
+
 SWE-bench style evaluation:
 
 ```powershell
