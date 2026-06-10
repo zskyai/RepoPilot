@@ -760,6 +760,7 @@ class RepoPilotWorkflow:
             sandbox_runs,
             failure_signals=[item.__dict__ for item in failure_signals],
         )
+        patch_portfolio = self._patch_portfolio(patch_checks, sandbox_runs)
         if (
             isinstance(github_result, dict)
             and isinstance(github_result.get("ci_feedback"), dict)
@@ -797,6 +798,7 @@ class RepoPilotWorkflow:
             "second_pass_advice": second_pass,
             "failure_signals": [item.__dict__ for item in failure_signals],
             "selected_patch": selected_patch,
+            "patch_portfolio": patch_portfolio,
             "repair_journal": self._repair_journal(sandbox_runs),
             "pr_plan": pr_plan,
             "brain": "real_llm_multi_agent" if self.use_llm else "rule_based_workflow",
@@ -1625,9 +1627,18 @@ index 0000000..1111111
             runs,
             failure_signals=failure_signals,
         ) or patch_checks
+        candidate_limit = min(
+            3,
+            max(1, sum(1 for item in ordered_checks if item.get("passed"))),
+        )
+        evaluated = 0
+        validated_candidates = 0
         for item in ordered_checks:
             if not item.get("passed"):
                 continue
+            if evaluated >= candidate_limit:
+                break
+            evaluated += 1
             sandbox_root = repo / ".repopilot" / "sandbox"
             if sandbox_root.exists():
                 shutil.rmtree(sandbox_root)
@@ -1671,7 +1682,9 @@ index 0000000..1111111
                     runs.append(test)
             candidate_runs = [entry for entry in runs if entry.get("patch_file") == str(patch_file)]
             if candidate_runs and all(entry.get("passed") for entry in candidate_runs):
-                break
+                validated_candidates += 1
+                if validated_candidates >= 2:
+                    break
         if not runs:
             sandbox_root = repo / ".repopilot" / "sandbox"
             runs.append(
@@ -1683,8 +1696,21 @@ index 0000000..1111111
                     "passed": False,
                     "stdout": "",
                     "stderr": "No patch passed git apply --check, sandbox apply skipped.",
+                    "portfolio_summary": {
+                        "evaluated_candidates": 0,
+                        "validated_candidates": 0,
+                        "candidate_limit": candidate_limit,
+                    },
                 }
             )
+        else:
+            portfolio_summary = {
+                "evaluated_candidates": evaluated,
+                "validated_candidates": validated_candidates,
+                "candidate_limit": candidate_limit,
+            }
+            for item in runs:
+                item["portfolio_summary"] = portfolio_summary
         return runs
 
     def _apply_patch_to_worktree(
@@ -1771,7 +1797,7 @@ index 0000000..1111111
         patch_checks: list[dict[str, Any]],
         sandbox_runs: list[dict[str, Any]],
     ) -> str | None:
-        candidates: list[tuple[int, str]] = []
+        validated_checks: list[dict[str, Any]] = []
         for item in patch_checks:
             patch_file = item.get("patch_file")
             if not patch_file or not item.get("passed"):
@@ -1779,13 +1805,15 @@ index 0000000..1111111
             related = [run for run in sandbox_runs if run.get("patch_file") == patch_file]
             if not related:
                 continue
-            score = sum(1 for run in related if run.get("passed"))
             if related and all(run.get("passed") for run in related):
-                candidates.append((score, patch_file))
-        if not candidates:
+                validated_checks.append(item)
+        if not validated_checks:
             return None
-        candidates.sort(reverse=True)
-        return candidates[0][1]
+        selected = self.patch_selector.choose(validated_checks, sandbox_runs)
+        top = (selected.get("selected") or {}) if isinstance(selected, dict) else {}
+        if top.get("patch_file"):
+            return str(top["patch_file"])
+        return str(validated_checks[0].get("patch_file"))
 
     def _worktree_dirty_state(self, repo: Path) -> str:
         if not (repo / ".git").exists():
@@ -1983,6 +2011,31 @@ index 0000000..1111111
                 }
             )
         return journal
+
+    def _patch_portfolio(
+        self,
+        patch_checks: list[dict[str, Any]],
+        sandbox_runs: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        ranked = self.patch_selector.choose(patch_checks, sandbox_runs)
+        candidates = ranked.get("candidates", []) if isinstance(ranked, dict) else []
+        validated = []
+        for item in candidates:
+            patch_file = item.get("patch_file", "")
+            related = [run for run in sandbox_runs if run.get("patch_file") == patch_file]
+            if related and all(run.get("passed") for run in related):
+                validated.append(item)
+        portfolio_summary = next(
+            (item.get("portfolio_summary") for item in sandbox_runs if item.get("portfolio_summary")),
+            {},
+        )
+        return {
+            "evaluated_candidates": portfolio_summary.get("evaluated_candidates", 0),
+            "validated_candidates": portfolio_summary.get("validated_candidates", 0),
+            "candidate_limit": portfolio_summary.get("candidate_limit", 0),
+            "top_candidates": candidates[:5],
+            "validated_top_candidates": validated[:3],
+        }
 
     def _learn_from_memory_hits(self, memory_hits: list[dict[str, Any]]) -> dict[str, Any]:
         family_stats: dict[str, dict[str, int]] = {}
@@ -2300,6 +2353,9 @@ index 0000000..1111111
 ## Patch 校验
 {self._format_patch_checks(task.analysis["patch_checks"])}
 
+## Patch 组合评估
+{self._format_patch_portfolio(task.analysis.get("patch_portfolio", {}))}
+
 ## 测试计划
 {chr(10).join(f"{idx}. {item}" for idx, item in enumerate(task.analysis["test_plan"], start=1))}
 
@@ -2367,6 +2423,24 @@ index 0000000..1111111
                 )
             if item.get("stderr"):
                 lines.append(f"  - {item['stderr'][:300]}")
+        return "\n".join(lines)
+
+    def _format_patch_portfolio(self, patch_portfolio: dict[str, Any]) -> str:
+        if not patch_portfolio:
+            return "No patch portfolio."
+        lines = [
+            f"- evaluated_candidates: {patch_portfolio.get('evaluated_candidates', 0)}",
+            f"- validated_candidates: {patch_portfolio.get('validated_candidates', 0)}",
+            f"- candidate_limit: {patch_portfolio.get('candidate_limit', 0)}",
+        ]
+        for item in patch_portfolio.get("validated_top_candidates", [])[:3]:
+            lines.append(
+                f"- validated: {item.get('title')} "
+                f"score={item.get('score')} "
+                f"coordination={item.get('coordination_score')} "
+                f"sandbox_pass_count={item.get('sandbox_pass_count')} "
+                f"changed_lines={item.get('changed_lines')}"
+            )
         return "\n".join(lines)
 
     def _format_sandbox_runs(self, sandbox_runs: list[dict[str, Any]]) -> str:
