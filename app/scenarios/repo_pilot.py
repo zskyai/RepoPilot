@@ -483,6 +483,46 @@ class RepoRetriever:
             for score, chunk, vector in top_scores
         ]
 
+    def build_context_packet(self, evidence: list[Evidence], max_items: int = 6) -> dict[str, Any]:
+        selected = evidence[:max_items]
+        files: list[str] = []
+        symbols: list[str] = []
+        calls: list[str] = []
+        snippets: list[dict[str, Any]] = []
+        for item in selected:
+            path = item.metadata.get("path", "")
+            if path and path not in files:
+                files.append(path)
+            for symbol in item.metadata.get("symbols", [])[:6]:
+                if symbol not in symbols:
+                    symbols.append(symbol)
+            for call in item.metadata.get("calls", [])[:6]:
+                if call not in calls:
+                    calls.append(call)
+            snippets.append(
+                {
+                    "title": item.title,
+                    "path": path,
+                    "score": item.score,
+                    "summary": self._compress_snippet(item.content),
+                }
+            )
+        return {
+            "files": files[:8],
+            "symbols": symbols[:12],
+            "calls": calls[:12],
+            "snippets": snippets,
+        }
+
+    def _compress_snippet(self, content: str, limit: int = 420) -> str:
+        lines = [line.rstrip() for line in content.splitlines() if line.strip()]
+        if not lines:
+            return ""
+        head = lines[:4]
+        tail = lines[-3:] if len(lines) > 7 else lines[4:]
+        text = "\n".join(head + (["..."] if len(lines) > 7 else []) + tail)
+        return text[:limit]
+
     def _to_evidence(self, chunk: CodeChunk, score: float, query_vector: list[float], chunk_vector: list[float]) -> Evidence:
         semantic = cosine_similarity(query_vector, chunk_vector)
         lexical = len(set(tokenize(chunk.content + "\n" + chunk.path)))
@@ -626,6 +666,7 @@ class RepoPilotWorkflow:
 
         retriever = RepoRetriever(chunks, repo_path=repo, code_graph=code_graph)
         evidence = retriever.search(issue, top_k=8)
+        context_packet = retriever.build_context_packet(evidence)
         task.evidence = evidence
         task.add_trace(
             "code_retriever_agent",
@@ -645,6 +686,7 @@ class RepoPilotWorkflow:
             memory_context = "\n\nMemory context:\n" + self._format_memory_hits(memory_hits) if memory_hits else ""
             if learned_repair_policy.get("summary_lines"):
                 memory_context += "\n\nRepair policy context:\n" + "\n".join(learned_repair_policy["summary_lines"])
+            memory_context += "\n\nCompressed repo context:\n" + self._format_context_packet(context_packet)
             root_cause = self.root_cause_agent.run(issue + memory_context, evidence)
             task.add_trace("root_cause_llm_agent", "finish", model="openai_compatible")
         change_plan = self._change_plan(issue, evidence, root_cause)
@@ -756,6 +798,7 @@ class RepoPilotWorkflow:
             "embedding_provider": retriever.embedding_provider,
             "memory_hits": memory_hits,
             "learned_repair_policy": learned_repair_policy,
+            "context_packet": context_packet,
         }
         task.report = self._report(task, repo, issue)
         self._judge(task)
@@ -830,6 +873,16 @@ class RepoPilotWorkflow:
                 f"  summary={item.get('summary')[:240]}\n"
                 f"  suspected={', '.join(payload.get('suspected_files', [])[:5])}"
             )
+        return "\n".join(lines)
+
+    def _format_context_packet(self, context_packet: dict[str, Any]) -> str:
+        lines = [
+            f"files={', '.join(context_packet.get('files', []))}",
+            f"symbols={', '.join(context_packet.get('symbols', []))}",
+            f"calls={', '.join(context_packet.get('calls', []))}",
+        ]
+        for item in context_packet.get("snippets", [])[:4]:
+            lines.append(f"- {item.get('title')} :: {item.get('summary')}")
         return "\n".join(lines)
 
     def _suspected_files(self, evidence: list[Evidence]) -> list[str]:
@@ -1180,11 +1233,32 @@ index 0000000..1111111
                 )
         return all_runs
 
+    def _split_patch_candidates(self, patch_suggestions: list[dict[str, str]]) -> list[dict[str, str]]:
+        expanded: list[dict[str, str]] = []
+        for item in patch_suggestions:
+            expanded.append(item)
+            diff = clean_unified_diff(item.get("diff", ""))
+            targets = self._extract_patch_targets(diff)
+            if len(targets) <= 1:
+                continue
+            hunks = self._split_unified_diff_by_file(diff)
+            for path, partial_diff in hunks.items():
+                expanded.append(
+                    {
+                        "title": f"{item.get('title', 'patch')} [focused:{path}]",
+                        "target_file": path,
+                        "reason": f"Focused single-file variant extracted from multi-file patch for safer apply: {path}",
+                        "diff": partial_diff,
+                    }
+                )
+        return expanded
+
     def _check_patches(self, repo: Path, patch_suggestions: list[dict[str, str]]) -> list[dict[str, Any]]:
         checks = []
         patch_dir = repo / ".repopilot" / "patches"
         patch_dir.mkdir(parents=True, exist_ok=True)
-        for idx, suggestion in enumerate(patch_suggestions, start=1):
+        expanded_suggestions = self._split_patch_candidates(patch_suggestions)
+        for idx, suggestion in enumerate(expanded_suggestions, start=1):
             diff = clean_unified_diff(suggestion.get("diff", ""))
             touched_files = self._extract_patch_targets(diff)
             patch_file = patch_dir / f"suggestion_{idx}.patch"
@@ -1224,6 +1298,32 @@ index 0000000..1111111
                 check["stderr"] = "Patch is not unified diff style."
             checks.append(check)
         return checks
+
+    def _split_unified_diff_by_file(self, diff: str) -> dict[str, str]:
+        files: dict[str, list[str]] = {}
+        current_path = ""
+        current_lines: list[str] = []
+        for line in diff.splitlines():
+            if line.startswith("diff --git "):
+                if current_path and current_lines:
+                    files[current_path] = current_lines[:]
+                current_path = ""
+                current_lines = [line]
+                continue
+            if line.startswith("--- "):
+                current_lines.append(line)
+                continue
+            if line.startswith("+++ "):
+                current_lines.append(line)
+                path = line[4:].strip()
+                if path.startswith("b/"):
+                    path = path[2:]
+                current_path = path
+                continue
+            current_lines.append(line)
+        if current_path and current_lines:
+            files[current_path] = current_lines[:]
+        return {path: "\n".join(lines) + "\n" for path, lines in files.items()}
 
     def _extract_patch_targets(self, diff: str) -> list[str]:
         targets: list[str] = []
