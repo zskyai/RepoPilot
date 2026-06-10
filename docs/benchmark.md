@@ -56,6 +56,16 @@ The benchmark outputs:
 - `graph_run_id` and `trace_db_path`
 - a markdown summary table for README / report reuse
 
+## Public Snapshot
+
+Current public self-hosted SWE-style snapshot:
+
+- `case_count = 8`
+- `pass_at_1 = 1.0`
+- `average_elapsed_seconds = 40.9`
+
+This is a self-hosted stable suite, not an official SWE-bench leaderboard claim. Its purpose is to show repeatable end-to-end agent behavior on controlled repository tasks.
+
 ## Current State
 
 Current benchmark contains 8 stable cases covering:
