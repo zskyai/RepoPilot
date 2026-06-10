@@ -193,12 +193,48 @@ class IntentAgent(LLMRepoAgent):
         }
 
 
+class BlueprintAgent(LLMRepoAgent):
+    def run(
+        self,
+        issue: str,
+        intent_packet: dict[str, Any],
+        evidence: list[Evidence],
+        coordination_plan: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        text = self.ask(
+            "You are RepoPilot BlueprintAgent. Convert the request into an implementation blueprint. "
+            "Return JSON only with keys: feature_slice, sub_tasks, interface_contracts, data_flow, verification_steps. "
+            "All values should be concise Chinese, and list fields must be arrays.\n\n"
+            f"Issue:\n{issue}\n\nIntent:\n{json.dumps(intent_packet, ensure_ascii=False)}\n\n"
+            f"Coordination:\n{json.dumps(coordination_plan[:6], ensure_ascii=False)}\n\nEvidence:\n{evidence_brief(evidence)}"
+        )
+        data = parse_json_object(text)
+        if not data:
+            return {}
+        return {
+            "feature_slice": str(data.get("feature_slice") or ""),
+            "sub_tasks": [str(item) for item in (data.get("sub_tasks") or [])[:8]],
+            "interface_contracts": [str(item) for item in (data.get("interface_contracts") or [])[:8]],
+            "data_flow": [str(item) for item in (data.get("data_flow") or [])[:8]],
+            "verification_steps": [str(item) for item in (data.get("verification_steps") or [])[:8]],
+        }
+
+
 class PatchPlannerAgent(LLMRepoAgent):
-    def run(self, issue: str, root_cause: str, evidence: list[Evidence], intent_packet: dict[str, Any] | None = None) -> list[str]:
+    def run(
+        self,
+        issue: str,
+        root_cause: str,
+        evidence: list[Evidence],
+        intent_packet: dict[str, Any] | None = None,
+        implementation_blueprint: dict[str, Any] | None = None,
+    ) -> list[str]:
         text = self.ask(
             "Create a minimal engineering change plan in Chinese. "
             "Return JSON only: {\"steps\": [\"...\"]}. Use 4-7 steps. Mention specific files and tests.\n\n"
-            f"Issue:\n{issue}\n\nIntent:\n{json.dumps(intent_packet or {}, ensure_ascii=False)}\n\nRoot cause:\n{root_cause}\n\nEvidence:\n{evidence_brief(evidence)}"
+            f"Issue:\n{issue}\n\nIntent:\n{json.dumps(intent_packet or {}, ensure_ascii=False)}\n\n"
+            f"Blueprint:\n{json.dumps(implementation_blueprint or {}, ensure_ascii=False)}\n\n"
+            f"Root cause:\n{root_cause}\n\nEvidence:\n{evidence_brief(evidence)}"
         )
         data = parse_json_object(text)
         if data and isinstance(data.get("steps"), list):
@@ -213,13 +249,16 @@ class PatchSuggestionAgent(LLMRepoAgent):
         root_cause: str,
         evidence: list[Evidence],
         intent_packet: dict[str, Any] | None = None,
+        implementation_blueprint: dict[str, Any] | None = None,
     ) -> list[dict[str, str]]:
         text = self.ask(
             "You are a senior coding agent. Propose one safe patch suggestion. "
             "Return JSON only with keys: title, target_file, reason, diff. "
             "The diff value must be unified-diff style and must not include markdown fences. "
             "Prefer documentation/test patch if code change is risky.\n\n"
-            f"Issue:\n{issue}\n\nIntent:\n{json.dumps(intent_packet or {}, ensure_ascii=False)}\n\nRoot cause:\n{root_cause}\n\nEvidence:\n{evidence_brief(evidence)}"
+            f"Issue:\n{issue}\n\nIntent:\n{json.dumps(intent_packet or {}, ensure_ascii=False)}\n\n"
+            f"Blueprint:\n{json.dumps(implementation_blueprint or {}, ensure_ascii=False)}\n\n"
+            f"Root cause:\n{root_cause}\n\nEvidence:\n{evidence_brief(evidence)}"
         )
         data = parse_json_object(text)
         if data:
@@ -618,6 +657,11 @@ class RepoPilotWorkflow:
             "You are RepoPilot IntentAgent, extracting user intent, constraints, and acceptance criteria.",
             self.llm,
         ) if self.llm else None
+        self.blueprint_agent = BlueprintAgent(
+            "blueprint_agent",
+            "You are RepoPilot BlueprintAgent, turning intent into implementation blueprints.",
+            self.llm,
+        ) if self.llm else None
         self.root_cause_agent = RootCauseAgent(
             "root_cause_agent",
             "You are RepoPilot RootCauseAgent, a senior software debugging agent.",
@@ -720,6 +764,16 @@ class RepoPilotWorkflow:
         coordination_plan = self._multi_file_coordination_plan(evidence, code_graph)
         coordination_edges = self._coordination_edges(coordination_plan)
         coordination_waves = self._coordination_waves(coordination_plan, coordination_edges)
+        implementation_blueprint = self._implementation_blueprint(intent_packet, coordination_plan, suspected_files, [])
+        if self.blueprint_agent:
+            llm_blueprint = self.blueprint_agent.run(issue, intent_packet, evidence, coordination_plan)
+            if llm_blueprint:
+                implementation_blueprint = self._merge_implementation_blueprint(implementation_blueprint, llm_blueprint)
+                task.add_trace(
+                    "blueprint_llm_agent",
+                    "finish",
+                    sub_tasks=len(implementation_blueprint.get("sub_tasks", [])),
+                )
         root_cause = self._root_cause(issue, evidence)
         if memory_hits:
             root_cause = root_cause + "\n\n历史相似案例提示:\n" + self._format_memory_hits(memory_hits)
@@ -734,14 +788,32 @@ class RepoPilotWorkflow:
             task.add_trace("root_cause_llm_agent", "finish", model="openai_compatible")
         change_plan = self._change_plan(issue, evidence, root_cause)
         if self.patch_planner_agent:
-            change_plan = self.patch_planner_agent.run(issue, root_cause, evidence, intent_packet=intent_packet)
+            change_plan = self.patch_planner_agent.run(
+                issue,
+                root_cause,
+                evidence,
+                intent_packet=intent_packet,
+                implementation_blueprint=implementation_blueprint,
+            )
             task.add_trace("patch_planner_llm_agent", "finish", steps=len(change_plan))
         test_plan = self._test_plan(repo, issue, suspected_files)
+        implementation_blueprint = self._merge_implementation_blueprint(
+            implementation_blueprint,
+            {"verification_steps": test_plan[:4]},
+        )
         atomic_change_bundle = self._atomic_change_bundle(coordination_plan, test_plan)
+        execution_units = self._execution_units(implementation_blueprint, coordination_waves)
+        acceptance_bundle = self._acceptance_bundle(intent_packet, implementation_blueprint, atomic_change_bundle)
         risk_items = self._risk_review(issue, suspected_files)
         patch_suggestions = self._patch_suggestions(issue, suspected_files, root_cause)
         if self.patch_suggestion_agent:
-            patch_suggestions = self.patch_suggestion_agent.run(issue, root_cause, evidence, intent_packet=intent_packet)
+            patch_suggestions = self.patch_suggestion_agent.run(
+                issue,
+                root_cause,
+                evidence,
+                intent_packet=intent_packet,
+                implementation_blueprint=implementation_blueprint,
+            )
             task.add_trace("patch_suggestion_llm_agent", "finish", suggestions=len(patch_suggestions))
         patch_checks = self._check_patches(repo, patch_suggestions, coordination_plan=coordination_plan)
         if patch_suggestions and not any(item.get("passed") for item in patch_checks):
@@ -830,12 +902,15 @@ class RepoPilotWorkflow:
         ]
         task.analysis = {
             "intent_packet": intent_packet,
+            "implementation_blueprint": implementation_blueprint,
             "root_cause_hypothesis": root_cause,
             "suspected_files": suspected_files,
             "coordination_plan": coordination_plan,
             "coordination_edges": coordination_edges,
             "coordination_waves": coordination_waves,
             "atomic_change_bundle": atomic_change_bundle,
+            "execution_units": execution_units,
+            "acceptance_bundle": acceptance_bundle,
             "change_plan": change_plan,
             "test_plan": test_plan,
             "risk_items": risk_items,
@@ -1050,6 +1125,99 @@ class RepoPilotWorkflow:
             combined.extend(str(item) for item in (override.get(key) or []) if str(item).strip())
             merged[key] = list(dict.fromkeys(combined))[:6]
         return merged
+
+    def _implementation_blueprint(
+        self,
+        intent_packet: dict[str, Any],
+        coordination_plan: list[dict[str, Any]],
+        suspected_files: list[str],
+        test_plan: list[str],
+    ) -> dict[str, Any]:
+        primary_files = [item.get("path", "").replace("\\", "/") for item in coordination_plan if item.get("role") == "primary"]
+        test_files = [item.get("path", "").replace("\\", "/") for item in coordination_plan if item.get("role") == "test"]
+        support_files = [item.get("path", "").replace("\\", "/") for item in coordination_plan if item.get("role") == "support"]
+        sub_tasks: list[str] = []
+        if primary_files:
+            sub_tasks.append(f"优先修改核心实现文件：{', '.join(primary_files[:3])}")
+        if support_files:
+            sub_tasks.append(f"同步检查支撑配置/文档文件：{', '.join(support_files[:2])}")
+        if test_files:
+            sub_tasks.append(f"补齐或更新验证文件：{', '.join(test_files[:3])}")
+        for item in intent_packet.get("acceptance_criteria", [])[:3]:
+            sub_tasks.append(f"围绕验收标准落地：{item}")
+        interface_contracts = []
+        if any("api" in path.lower() for path in primary_files + suspected_files):
+            interface_contracts.append("保持接口输入输出结构兼容，必要时同步更新测试断言")
+        if test_files:
+            interface_contracts.append("修改实现后，相关测试文件必须反映新行为或保持原契约")
+        data_flow = []
+        for item in coordination_plan[:4]:
+            path = item.get("path", "").replace("\\", "/")
+            related = ", ".join(item.get("related_files", [])[:3])
+            if path:
+                data_flow.append(f"{path} -> {related or '本地逻辑闭环'}")
+        verification_steps = list(dict.fromkeys((intent_packet.get("acceptance_criteria", []) or []) + test_plan))[:6]
+        return {
+            "feature_slice": intent_packet.get("product_goal") or "实现当前仓库请求的最小闭环改动",
+            "sub_tasks": sub_tasks[:8] or ["定位核心实现文件并完成最小变更"],
+            "interface_contracts": interface_contracts[:8] or ["保持已有调用方兼容性"],
+            "data_flow": data_flow[:8] or ["从输入路径到目标实现形成可验证闭环"],
+            "verification_steps": verification_steps or ["执行最小复现与回归验证"],
+        }
+
+    def _merge_implementation_blueprint(self, base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+        merged = dict(base)
+        feature_slice = str(override.get("feature_slice") or "").strip()
+        if feature_slice:
+            merged["feature_slice"] = feature_slice
+        for key in ["sub_tasks", "interface_contracts", "data_flow", "verification_steps"]:
+            combined = list(base.get(key, []) or [])
+            combined.extend(str(item) for item in (override.get(key) or []) if str(item).strip())
+            merged[key] = list(dict.fromkeys(combined))[:8]
+        return merged
+
+    def _execution_units(
+        self,
+        implementation_blueprint: dict[str, Any],
+        coordination_waves: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        units: list[dict[str, Any]] = []
+        sub_tasks = implementation_blueprint.get("sub_tasks", []) or []
+        for idx, wave in enumerate(coordination_waves[:6], start=1):
+            units.append(
+                {
+                    "unit": idx,
+                    "goal": sub_tasks[idx - 1] if idx - 1 < len(sub_tasks) else f"完成第 {idx} 波文件协同修改",
+                    "files": wave.get("files", []),
+                    "roles": wave.get("roles", []),
+                    "verification": implementation_blueprint.get("verification_steps", [])[:2],
+                }
+            )
+        if not units:
+            units.append(
+                {
+                    "unit": 1,
+                    "goal": sub_tasks[0] if sub_tasks else "完成最小闭环代码修改",
+                    "files": [],
+                    "roles": [],
+                    "verification": implementation_blueprint.get("verification_steps", [])[:2],
+                }
+            )
+        return units
+
+    def _acceptance_bundle(
+        self,
+        intent_packet: dict[str, Any],
+        implementation_blueprint: dict[str, Any],
+        atomic_change_bundle: dict[str, Any],
+    ) -> dict[str, Any]:
+        return {
+            "user_visible_outcome": intent_packet.get("user_visible_outcome", ""),
+            "acceptance_criteria": list(dict.fromkeys(intent_packet.get("acceptance_criteria", []) or []))[:6],
+            "verification_steps": list(dict.fromkeys(implementation_blueprint.get("verification_steps", []) or []))[:6],
+            "required_primary_files": atomic_change_bundle.get("required_primary_files", []),
+            "required_test_files": atomic_change_bundle.get("required_test_files", []),
+        }
 
     def _coordination_edges(self, coordination_plan: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if not coordination_plan:
