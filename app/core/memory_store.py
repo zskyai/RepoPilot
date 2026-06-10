@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -80,6 +81,11 @@ class MemoryStore:
             score = cosine_similarity(query_vector, memory_vector)
             if repo_path and row[2] and Path(repo_path).resolve().as_posix() == Path(row[2]).resolve().as_posix():
                 score += 0.05
+            score += self._recency_bonus(row[1])
+            if row[5] == "passed":
+                score += 0.03
+            payload = json.loads(row[8])
+            score += self._repair_learning_bonus(payload)
             scored.append(
                 (
                     score,
@@ -93,12 +99,32 @@ class MemoryStore:
                         "embedding_provider": row[6],
                         "query_provider": provider,
                         "score": round(score, 4),
-                        "payload": json.loads(row[8]),
+                        "payload": payload,
                     },
                 )
             )
         scored.sort(key=lambda item: item[0], reverse=True)
         return [item for score, item in scored[:top_k] if score > 0.05]
+
+    def _recency_bonus(self, created_at: str) -> float:
+        try:
+            stamp = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+        except Exception:
+            return 0.0
+        age_days = max(0.0, (datetime.now(timezone.utc) - stamp).total_seconds() / 86400.0)
+        if age_days <= 3:
+            return 0.03
+        if age_days <= 14:
+            return 0.015
+        return 0.0
+
+    def _repair_learning_bonus(self, payload: dict[str, Any]) -> float:
+        journal = payload.get("repair_journal", []) or []
+        if not journal:
+            return 0.0
+        passed_rounds = sum(1 for item in journal if item.get("passed"))
+        focused_rounds = sum(1 for item in journal if len(item.get("target_files", []) or []) <= 2)
+        return min(0.05, passed_rounds * 0.01 + focused_rounds * 0.005)
 
     def _memory_text(self, payload: dict[str, Any], summary: str) -> str:
         analysis = payload.get("analysis", {})
