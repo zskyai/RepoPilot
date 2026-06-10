@@ -695,7 +695,11 @@ class RepoPilotWorkflow:
         )
         pr_plan["github"] = github_result
         failure_signals = self._collect_failure_signals(patch_checks, test_runs, sandbox_runs, github_result)
-        selected_patch = self.patch_selector.choose(patch_checks, sandbox_runs)
+        selected_patch = self.patch_selector.choose(
+            patch_checks,
+            sandbox_runs,
+            failure_signals=[item.__dict__ for item in failure_signals],
+        )
         if (
             isinstance(github_result, dict)
             and isinstance(github_result.get("ci_feedback"), dict)
@@ -729,6 +733,7 @@ class RepoPilotWorkflow:
             "second_pass_advice": second_pass,
             "failure_signals": [item.__dict__ for item in failure_signals],
             "selected_patch": selected_patch,
+            "repair_journal": self._repair_journal(sandbox_runs),
             "pr_plan": pr_plan,
             "brain": "real_llm_multi_agent" if self.use_llm else "rule_based_workflow",
             "sandbox_repair_rounds": max((item.get("repair_round", 1) for item in sandbox_runs), default=0),
@@ -1237,9 +1242,15 @@ index 0000000..1111111
         patch_checks: list[dict[str, Any]],
         test_plan: list[str],
         repair_round: int = 1,
+        failure_signals: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
         runs: list[dict[str, Any]] = []
-        for item in patch_checks:
+        ordered_checks = self.patch_selector.rank_patch_checks(
+            patch_checks,
+            runs,
+            failure_signals=failure_signals,
+        ) or patch_checks
+        for item in ordered_checks:
             if not item.get("passed"):
                 continue
             sandbox_root = repo / ".repopilot" / "sandbox"
@@ -1268,6 +1279,7 @@ index 0000000..1111111
                     "passed": apply_result.returncode == 0,
                     "stdout": apply_result.stdout[-1000:],
                     "stderr": apply_result.stderr[-1000:],
+                    "ranking": item.get("ranking", {}),
                 }
             )
             if apply_result.returncode == 0:
@@ -1276,6 +1288,7 @@ index 0000000..1111111
                     test["sandbox"] = str(sandbox_root)
                     test["patch_file"] = str(patch_file)
                     test["repair_round"] = repair_round
+                    test["ranking"] = item.get("ranking", {})
                     runs.append(test)
             candidate_runs = [entry for entry in runs if entry.get("patch_file") == str(patch_file)]
             if candidate_runs and all(entry.get("passed") for entry in candidate_runs):
@@ -1464,12 +1477,33 @@ index 0000000..1111111
         current_issue = issue
         current_suggestions = patch_suggestions
         current_checks = patch_checks
+        current_failure_signals: list[Any] = []
         for round_id in range(1, max_rounds + 1):
+            round_plan = self.failure_parser.summarize(current_failure_signals)
+            all_runs.append(
+                {
+                    "stage": "repair_plan",
+                    "repair_round": round_id,
+                    "passed": False,
+                    "returncode": 0,
+                    "stdout": "\n".join(
+                        [
+                            f"repair_round={round_id}",
+                            f"strategy={round_plan.get('strategy')}",
+                            f"primary_family={round_plan.get('primary_family')}",
+                            f"target_files={', '.join(round_plan.get('target_files', []))}",
+                        ]
+                    ),
+                    "stderr": "",
+                    "round_plan": round_plan,
+                }
+            )
             sandbox_runs = self._apply_patch_in_sandbox(
                 repo=repo,
                 patch_checks=current_checks,
                 test_plan=test_plan,
                 repair_round=round_id,
+                failure_signals=[item.__dict__ for item in current_failure_signals],
             )
             all_runs.extend(sandbox_runs)
             non_advisor_runs = [item for item in sandbox_runs if item.get("stage") != "repair_advice"]
@@ -1485,11 +1519,15 @@ index 0000000..1111111
             for run in sandbox_runs:
                 if not run.get("passed") and run.get("stage") == "sandbox_test":
                     parsed_failures.extend(self.failure_parser.parse_test_run(run))
-            if parsed_failures:
-                current_issue += "\nStructured failure signals:\n" + "\n".join(
-                    f"- {item.source}:{item.kind} {item.path}:{item.line or ''} {item.message[:300]}"
-                    for item in parsed_failures[:12]
-                )
+            current_failure_signals = parsed_failures
+            round_plan = self.failure_parser.summarize(parsed_failures)
+            current_issue = self._build_repair_round_issue(
+                base_issue=current_issue,
+                sandbox_runs=sandbox_runs,
+                parsed_failures=parsed_failures,
+                round_plan=round_plan,
+                round_id=round_id,
+            )
             if self.patch_suggestion_agent:
                 current_suggestions = self.patch_suggestion_agent.run(current_issue, root_cause, evidence)
             else:
@@ -1506,12 +1544,60 @@ index 0000000..1111111
                             f"Prepared repair round {round_id + 1}",
                             f"candidate_patches={len(current_suggestions)}",
                             f"applyable_patches={sum(1 for item in current_checks if item.get('passed'))}",
+                            f"strategy={round_plan.get('strategy')}",
                         ]
                     ),
                     "stderr": "",
+                    "round_plan": round_plan,
                 }
             )
         return current_suggestions, current_checks, all_runs
+
+    def _build_repair_round_issue(
+        self,
+        *,
+        base_issue: str,
+        sandbox_runs: list[dict[str, Any]],
+        parsed_failures: list[Any],
+        round_plan: dict[str, Any],
+        round_id: int,
+    ) -> str:
+        issue = self._patch_issue_with_failure_context(base_issue, sandbox_runs, round_id)
+        if parsed_failures:
+            issue += "\nStructured failure signals:\n" + "\n".join(
+                f"- {item.source}:{item.kind} {item.path}:{item.line or ''} {item.message[:300]}"
+                for item in parsed_failures[:12]
+            )
+        issue += (
+            "\n\nRepair strategy:\n"
+            f"- primary_family: {round_plan.get('primary_family')}\n"
+            f"- primary_kind: {round_plan.get('primary_kind')}\n"
+            f"- strategy: {round_plan.get('strategy')}\n"
+            f"- target_files: {', '.join(round_plan.get('target_files', []))}\n"
+            "- constraints: prefer the smallest diff, preserve behavior, avoid touching unrelated files\n"
+            "- output: return a strict unified diff without markdown fences\n"
+        )
+        return issue
+
+    def _repair_journal(self, sandbox_runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        journal: list[dict[str, Any]] = []
+        round_ids = sorted({int(item.get("repair_round", 0)) for item in sandbox_runs if item.get("repair_round")})
+        for round_id in round_ids:
+            round_entries = [item for item in sandbox_runs if int(item.get("repair_round", 0)) == round_id]
+            plan = next((item.get("round_plan", {}) for item in round_entries if item.get("stage") == "repair_plan"), {})
+            failed_entries = [item for item in round_entries if not item.get("passed")]
+            journal.append(
+                {
+                    "repair_round": round_id,
+                    "strategy": plan.get("strategy", ""),
+                    "primary_family": plan.get("primary_family", ""),
+                    "target_files": plan.get("target_files", []),
+                    "candidate_count": len({item.get("patch_file") for item in round_entries if item.get("patch_file")}),
+                    "passed": bool(round_entries) and all(item.get("passed") for item in round_entries if item.get("stage") != "repair_plan"),
+                    "failed_stages": [item.get("stage") for item in failed_entries[:6]],
+                }
+            )
+        return journal
 
     def _collect_failure_signals(
         self,
