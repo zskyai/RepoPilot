@@ -594,6 +594,8 @@ class RepoPilotWorkflow:
         create_pr: bool = False,
         poll_ci: bool = False,
         ci_feedback: bool = False,
+        auto_repair_ci: bool = False,
+        auto_sync_repair: bool = False,
         use_memory: bool = True,
         save_memory: bool = True,
         pr_number: int | None = None,
@@ -686,12 +688,24 @@ class RepoPilotWorkflow:
             create_pr=create_pr,
             poll_ci=poll_ci,
             ci_feedback=ci_feedback,
+            auto_repair_ci=auto_repair_ci,
+            auto_sync_repair=auto_sync_repair,
             pr_number=pr_number,
             comment_body=comment_body,
         )
         pr_plan["github"] = github_result
         failure_signals = self._collect_failure_signals(patch_checks, test_runs, sandbox_runs, github_result)
         selected_patch = self.patch_selector.choose(patch_checks, sandbox_runs)
+        if (
+            isinstance(github_result, dict)
+            and isinstance(github_result.get("ci_feedback"), dict)
+            and not github_result["ci_feedback"].get("passed", True)
+        ):
+            github_result["repair_comment_body"] = GitHubOps(repo).build_repair_comment(
+                ci_feedback=github_result.get("ci_feedback"),
+                failure_signals=[item.__dict__ for item in failure_signals],
+                selected_patch=selected_patch,
+            )
 
         task.plan = [
             "解析 issue 的错误现象、触发路径和验收标准",
@@ -1608,6 +1622,8 @@ index 0000000..1111111
         create_pr: bool,
         poll_ci: bool,
         ci_feedback: bool,
+        auto_repair_ci: bool,
+        auto_sync_repair: bool,
         pr_number: int | None,
         comment_body: str,
     ) -> dict[str, Any]:
@@ -1633,10 +1649,113 @@ index 0000000..1111111
             payload["ci_checks"] = ops.pr_checks(active_pr)
         if ci_feedback and active_pr:
             payload["ci_feedback"] = ops.ci_feedback(active_pr)
+        if auto_repair_ci and active_pr and isinstance(payload.get("ci_feedback"), dict):
+            payload["auto_repair_ci"] = self._auto_repair_from_ci_feedback(
+                repo=repo,
+                pr_number=active_pr,
+                ci_feedback=payload["ci_feedback"],
+                github_ops=ops,
+                auto_sync_repair=auto_sync_repair,
+            )
         if comment_body and active_pr:
             payload["comment"] = ops.comment_on_pr(active_pr, comment_body)
         payload["active_pr_number"] = active_pr
         return payload
+
+    def _auto_repair_from_ci_feedback(
+        self,
+        *,
+        repo: Path,
+        pr_number: int,
+        ci_feedback: dict[str, Any],
+        github_ops: GitHubOps,
+        auto_sync_repair: bool = False,
+    ) -> dict[str, Any]:
+        if ci_feedback.get("passed"):
+            return {"ok": True, "repaired": False, "reason": "CI already passed."}
+        if ci_feedback.get("pending"):
+            return {"ok": True, "repaired": False, "reason": "CI is still pending."}
+        failure_signals = self.failure_parser.parse_ci_feedback(ci_feedback)
+        rerun_issue = (
+            "GitHub CI failed. Re-run repair using CI annotations, failed checks, and repository context.\n\n"
+            + ci_feedback.get("repair_context", "")
+        )
+        rerun = self.run(
+            repo_path=repo,
+            issue=rerun_issue,
+            run_tests=True,
+            apply_sandbox=True,
+            apply_worktree=False,
+            create_pr=False,
+            poll_ci=False,
+            ci_feedback=False,
+            auto_repair_ci=False,
+            auto_sync_repair=False,
+            use_memory=True,
+            save_memory=False,
+            pr_number=None,
+            comment_body="",
+        )
+        selected_patch = rerun.task.analysis.get("selected_patch")
+        rerun_failure_signals = rerun.task.analysis.get("failure_signals", [])
+        sync_result: dict[str, Any] | None = None
+        chosen_patch = (selected_patch or {}).get("selected") or {}
+        sandbox_runs = rerun.task.analysis.get("sandbox_runs") or []
+        patch_checks = rerun.task.analysis.get("patch_checks") or []
+        verified_patch = bool(chosen_patch) and any(item.get("passed") for item in sandbox_runs) and any(
+            item.get("passed") for item in patch_checks
+        )
+        if auto_sync_repair and verified_patch:
+            pr_info = github_ops.pr_info(pr_number)
+            if pr_info.get("ok") and pr_info.get("head_ref") and chosen_patch.get("patch_file"):
+                sync_result = github_ops.sync_patch_to_branch(
+                    branch=str(pr_info["head_ref"]),
+                    patch_file=str(chosen_patch["patch_file"]),
+                    commit_message=f"RepoPilot auto-repair for PR #{pr_number}",
+                )
+            else:
+                sync_result = {
+                    "ok": False,
+                    "error": pr_info.get("error", "missing head branch or patch file for sync"),
+                }
+        repair_comment = github_ops.build_repair_comment(
+            ci_feedback=ci_feedback,
+            failure_signals=rerun_failure_signals or [item.__dict__ for item in failure_signals],
+            selected_patch=selected_patch,
+        )
+        repair_comment += (
+            "\n\nRerun summary:\n"
+            f"- overall: {rerun.task.evaluation.get('overall')}\n"
+            f"- passed: {rerun.task.evaluation.get('passed')}\n"
+            f"- retrieval_engine: {rerun.task.analysis.get('retrieval_engine')}\n"
+            f"- graph_run_id: {rerun.task.analysis.get('graph_run_id', '')}\n"
+        )
+        if sync_result is not None:
+            repair_comment += (
+                "\nAuto sync:\n"
+                f"- enabled: True\n"
+                f"- ok: {sync_result.get('ok')}\n"
+                f"- branch: {sync_result.get('branch', '')}\n"
+                f"- files: {', '.join(sync_result.get('files', []))}\n"
+                f"- error: {sync_result.get('error', '')}\n"
+            )
+        comment = github_ops.comment_on_pr(pr_number, repair_comment)
+        return {
+            "ok": True,
+            "repaired": bool(rerun.task.analysis.get("selected_patch", {}).get("selected")),
+            "comment": comment,
+            "patch_sync": sync_result,
+            "repair_context": ci_feedback.get("repair_context", ""),
+            "failure_signals": rerun_failure_signals or [item.__dict__ for item in failure_signals],
+            "rerun_summary": {
+                "overall": rerun.task.evaluation.get("overall"),
+                "passed": rerun.task.evaluation.get("passed"),
+                "graph_run_id": rerun.task.analysis.get("graph_run_id"),
+                "selected_patch": selected_patch,
+                "patch_checks": rerun.task.analysis.get("patch_checks"),
+                "sandbox_runs": rerun.task.analysis.get("sandbox_runs"),
+            },
+        }
 
     def _report(self, task: ResearchTask, repo: Path, issue: str) -> str:
         evidence_lines = [
