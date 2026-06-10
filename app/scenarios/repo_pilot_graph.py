@@ -36,11 +36,13 @@ class RepoPilotGraphWorkflow:
         require_llm: bool = False,
         max_repair_rounds: int = 2,
         enable_multi_candidate: bool = True,
+        enable_graph_rerank: bool = True,
     ) -> None:
         self.base = RepoPilotWorkflow(
             use_llm=use_llm,
             require_llm=require_llm,
             enable_multi_candidate=enable_multi_candidate,
+            enable_graph_rerank=enable_graph_rerank,
         )
         self.max_repair_rounds = max_repair_rounds
         self.graph = self._build_graph()
