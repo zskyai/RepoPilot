@@ -75,8 +75,8 @@ Current public self-hosted SWE-style snapshot:
 - `case_count = 8`
 - `pass_at_1 = 1.0`
 - `pass_rate = 1.0`
-- `average_overall = 0.897`
-- `average_elapsed_seconds = 76.2`
+- `average_overall = 0.911`
+- `average_elapsed_seconds = 39.8`
 
 This is a self-hosted stable suite, not an official SWE-bench leaderboard claim. Its purpose is to show repeatable end-to-end agent behavior on controlled repository tasks.
 
@@ -87,9 +87,9 @@ Recent validated documentation-oriented benchmark gains:
 - `readme_quickstart_self_repo = 0.935`
 - `benchmark_docs_self_repo = 0.935`
 - `sqlite_trace_self_repo = 0.935`
-- `slugify_contributor_docs = 0.833`
-- `slugify_test_entrypoint = 0.833`
-- `slugify_release_docs = 0.833`
+- `slugify_contributor_docs = 0.870`
+- `slugify_test_entrypoint = 0.870`
+- `slugify_release_docs = 0.870`
 
 These gains came from real patch-quality improvements, especially better README-targeted patch generation, whitespace-tolerant `git apply` fallback on mixed-EOL repositories, and automatic unified-diff hunk recounting before patch validation.
 

@@ -27,7 +27,7 @@ It then produced a documentation-oriented patch proposal and reached:
 
 - `patch_apply_check = 1.0`
 - `sandbox_apply = 0.333`
-- `overall = 0.833`
+- `overall = 0.870`
 
 ### Why This Case Matters
 
@@ -92,8 +92,8 @@ Latest validated snapshot:
 
 - `case_count = 8`
 - `pass_rate = 1.0`
-- `average_overall = 0.897`
-- `average_elapsed_seconds = 76.2`
+- `average_overall = 0.911`
+- `average_elapsed_seconds = 39.8`
 
 Coverage includes:
 

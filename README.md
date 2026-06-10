@@ -71,15 +71,15 @@ Latest stable self-hosted SWE-style snapshot:
 
 - `case_count = 8`
 - `pass_rate = 1.0`
-- `average_overall = 0.897`
-- `average_elapsed_seconds = 76.2`
+- `average_overall = 0.911`
+- `average_elapsed_seconds = 39.8`
 - coverage includes retrieval, approval gates, repair signals, memory, trace store, GitHub workflow discovery, and dashboard operator paths
 
 Latest representative real-repo case:
 
 - repository: `python-slugify`
 - task: contributor-facing README improvement and test-entry guidance
-- overall score: `0.833`
+- overall score: `0.870`
 - `patch_apply_check = 1.0`
 - localized files: `README.md`, `test.py`
 
@@ -101,8 +101,8 @@ Recent work focused on making documentation-oriented patching behave more like a
 The result is a stronger patch-quality profile:
 
 - self-repo documentation and operator-facing cases now reach `0.935`
-- open-source documentation cases now reach `0.833`
-- full 8-case benchmark average is `0.897`
+- open-source documentation cases now reach `0.870`
+- full 8-case benchmark average is `0.911`
 
 ## Quick Start
 
