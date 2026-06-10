@@ -38,6 +38,8 @@ class RepoPilotRequest(BaseModel):
     create_pr: bool = False
     poll_ci: bool = False
     ci_feedback: bool = False
+    auto_repair_ci: bool = False
+    auto_sync_repair: bool = False
     use_memory: bool = True
     save_memory: bool = True
     pr_number: int | None = None
@@ -91,6 +93,8 @@ if FastAPI:
         <label><input type="checkbox" id="create_pr" /> create pr</label>
         <label><input type="checkbox" id="poll_ci" /> poll ci</label>
         <label><input type="checkbox" id="ci_feedback" /> ci feedback</label>
+        <label><input type="checkbox" id="auto_repair_ci" /> auto repair ci</label>
+        <label><input type="checkbox" id="auto_sync_repair" /> auto sync repair</label>
         <label><input type="checkbox" id="use_memory" checked /> memory</label>
         <label><input type="checkbox" id="save_memory" checked /> save memory</label>
         <label><input type="checkbox" id="require_approval" checked /> approval gate</label>
@@ -105,6 +109,10 @@ if FastAPI:
     <div class="grid" style="margin-top:16px;">
       <div class="panel"><h3>Summary</h3><pre id="summary"></pre></div>
       <div class="panel"><h3>Trace</h3><pre id="trace"></pre></div>
+    </div>
+    <div class="grid" style="margin-top:16px;">
+      <div class="panel"><h3>Selected Patch</h3><pre id="selected_patch"></pre></div>
+      <div class="panel"><h3>Failure Signals</h3><pre id="failure_signals"></pre></div>
     </div>
     <div class="panel" style="margin-top:16px;"><h3>Full JSON</h3><pre id="json"></pre></div>
   </div>
@@ -122,6 +130,8 @@ if FastAPI:
         create_pr: document.getElementById('create_pr').checked,
         poll_ci: document.getElementById('poll_ci').checked,
         ci_feedback: document.getElementById('ci_feedback').checked,
+        auto_repair_ci: document.getElementById('auto_repair_ci').checked,
+        auto_sync_repair: document.getElementById('auto_sync_repair').checked,
         use_memory: document.getElementById('use_memory').checked,
         save_memory: document.getElementById('save_memory').checked,
         pr_number: document.getElementById('pr_number').value ? Number(document.getElementById('pr_number').value) : null,
@@ -150,9 +160,12 @@ if FastAPI:
         memory_hits: data.analysis?.memory_hits,
         saved_memory_id: data.analysis?.saved_memory_id,
         approval_gate: data.analysis?.approval_gate,
+        checkpoint_state: data.analysis?.checkpoint_state,
         pr_ready: data.pr_plan?.ready
       }, null, 2);
       document.getElementById('trace').textContent = JSON.stringify(data.analysis?.graph_trace || data.trace || [], null, 2);
+      document.getElementById('selected_patch').textContent = JSON.stringify(data.analysis?.selected_patch || {}, null, 2);
+      document.getElementById('failure_signals').textContent = JSON.stringify(data.analysis?.failure_signals || [], null, 2);
       document.getElementById('json').textContent = JSON.stringify(data, null, 2);
     }
   </script>
@@ -174,6 +187,8 @@ if FastAPI:
             create_pr=req.create_pr,
             poll_ci=req.poll_ci,
             ci_feedback=req.ci_feedback,
+            auto_repair_ci=req.auto_repair_ci,
+            auto_sync_repair=req.auto_sync_repair,
             use_memory=req.use_memory,
             save_memory=req.save_memory,
             pr_number=req.pr_number,
