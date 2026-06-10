@@ -51,6 +51,47 @@ class CodeGraph:
     def file_context(self, path: str) -> dict[str, Any]:
         return self.files.get(path, {})
 
+    def neighbors(self, path: str) -> list[str]:
+        related: list[str] = []
+        symbol_to_path = {symbol.name: symbol.path for symbol in self.symbols}
+        for relation in self.relations:
+            if relation.path == path:
+                target_path = symbol_to_path.get(relation.target, "")
+                if target_path and target_path != path and target_path not in related:
+                    related.append(target_path)
+        imports = self.files.get(path, {}).get("imports", []) or []
+        file_names = {item_path.split("/")[-1].split(".")[0]: item_path for item_path in self.files}
+        for entry in imports:
+            tokens = entry.replace(",", " ").replace(";", " ").split()
+            for token in tokens:
+                normalized = token.strip().split(".")[-1]
+                target_path = file_names.get(normalized, "")
+                if target_path and target_path != path and target_path not in related:
+                    related.append(target_path)
+        return related
+
+    def impact_subgraph(self, seed_paths: list[str], max_hops: int = 2) -> dict[str, Any]:
+        normalized = [path.replace("\\", "/") for path in seed_paths if path]
+        frontier = normalized[:]
+        visited = set(normalized)
+        edges: list[dict[str, Any]] = []
+        for hop in range(1, max_hops + 1):
+            next_frontier: list[str] = []
+            for path in frontier:
+                for neighbor in self.neighbors(path):
+                    if neighbor not in visited:
+                        visited.add(neighbor)
+                        next_frontier.append(neighbor)
+                    edges.append({"source": path, "target": neighbor, "hop": hop})
+            frontier = next_frontier
+            if not frontier:
+                break
+        return {
+            "seed_paths": normalized,
+            "nodes": list(visited),
+            "edges": edges,
+        }
+
     def summary(self) -> dict[str, Any]:
         by_kind: dict[str, int] = {}
         for symbol in self.symbols:
