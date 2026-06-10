@@ -666,9 +666,16 @@ class RepoPilotWorkflow:
     cause, proposes a patch plan, and generates a test/risk checklist.
     """
 
-    def __init__(self, use_llm: bool = False, require_llm: bool = False, llm: LLMClient | None = None) -> None:
+    def __init__(
+        self,
+        use_llm: bool = False,
+        require_llm: bool = False,
+        llm: LLMClient | None = None,
+        enable_multi_candidate: bool = True,
+    ) -> None:
         self.use_llm = use_llm
         self.llm = llm or (build_llm(require_config=require_llm) if use_llm else None)
+        self.enable_multi_candidate = enable_multi_candidate
         self.intent_agent = IntentAgent(
             "intent_agent",
             "You are RepoPilot IntentAgent, extracting user intent, constraints, and acceptance criteria.",
@@ -838,14 +845,17 @@ class RepoPilotWorkflow:
                 intent_packet=intent_packet,
                 implementation_blueprint=implementation_blueprint,
             )
-            patch_suggestions.extend(
-                self._execution_unit_patch_candidates(
-                    implementation_blueprint,
-                    execution_units,
-                    acceptance_bundle,
+            if self.enable_multi_candidate:
+                patch_suggestions.extend(
+                    self._execution_unit_patch_candidates(
+                        implementation_blueprint,
+                        execution_units,
+                        acceptance_bundle,
+                    )
                 )
-            )
             task.add_trace("patch_suggestion_llm_agent", "finish", suggestions=len(patch_suggestions))
+        if not self.enable_multi_candidate and patch_suggestions:
+            patch_suggestions = patch_suggestions[:1]
         patch_checks = self._check_patches(repo, patch_suggestions, coordination_plan=coordination_plan)
         if patch_suggestions and not any(item.get("passed") for item in patch_checks):
             fallback = self._patch_suggestions(
@@ -857,6 +867,8 @@ class RepoPilotWorkflow:
                 acceptance_bundle=acceptance_bundle,
             )
             patch_suggestions = fallback
+            if not self.enable_multi_candidate and patch_suggestions:
+                patch_suggestions = patch_suggestions[:1]
             patch_checks = self._check_patches(repo, patch_suggestions, coordination_plan=coordination_plan)
             task.add_trace(
                 "patch_fallback_agent",
@@ -1668,13 +1680,14 @@ index 0000000..1111111
 """,
                     }
                 )
-            suggestions.extend(
-                self._execution_unit_patch_candidates(
-                    implementation_blueprint or {},
-                    execution_units or [],
-                    acceptance_bundle or {},
+            if self.enable_multi_candidate:
+                suggestions.extend(
+                    self._execution_unit_patch_candidates(
+                        implementation_blueprint or {},
+                        execution_units or [],
+                        acceptance_bundle or {},
+                    )
                 )
-            )
         return suggestions
 
     def _patch_issue_with_failure_context(
