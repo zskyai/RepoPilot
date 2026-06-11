@@ -3364,6 +3364,16 @@ index 0000000..1111111
             },
         }
 
+        task.optimization = {
+            "badcase_type": "none" if task.evaluation["passed"] else "weak_issue_localization",
+            "suggestions": [
+                "接入 git diff 和测试执行器，形成 issue -> patch -> test 的闭环。",
+                "加入调用图、依赖图和最近提交检索，提高跨文件定位能力。",
+                "沉淀历史 issue、PR 和测试失败日志作为企业研发知识库。",
+            ],
+        }
+        task.add_trace("repo_judge_agent", "finish", overall=overall, passed=task.evaluation["passed"])
+
     def _test_run_credit(self, run: dict[str, Any]) -> float:
         if run.get("passed"):
             return 1.0
@@ -3403,18 +3413,16 @@ index 0000000..1111111
             patch_file = str(item.get("patch_file") or "")
             grouped.setdefault(patch_file, []).append(item)
         if not grouped:
-            return sum(1 for item in validation_runs if item.get("passed")) / max(1, len(validation_runs))
+            return sum(self._sandbox_run_credit(item) for item in validation_runs) / max(1, len(validation_runs))
         best = 0.0
         for runs in grouped.values():
-            ratio = sum(1 for item in runs if item.get("passed")) / max(1, len(runs))
+            ratio = sum(self._sandbox_run_credit(item) for item in runs) / max(1, len(runs))
             best = max(best, ratio)
         return best
-        task.optimization = {
-            "badcase_type": "none" if task.evaluation["passed"] else "weak_issue_localization",
-            "suggestions": [
-                "接入 git diff 和测试执行器，形成 issue -> patch -> test 的闭环。",
-                "加入调用图、依赖图和最近提交检索，提高跨文件定位能力。",
-                "沉淀历史 issue、PR 和测试失败日志作为企业研发知识库。",
-            ],
-        }
-        task.add_trace("repo_judge_agent", "finish", overall=overall, passed=task.evaluation["passed"])
+
+    def _sandbox_run_credit(self, run: dict[str, Any]) -> float:
+        if run.get("stage") == "apply_patch":
+            return 1.0 if run.get("passed") else 0.0
+        if run.get("stage") == "sandbox_test":
+            return self._test_run_credit(run)
+        return 1.0 if run.get("passed") else 0.0
