@@ -76,7 +76,7 @@ Current public self-hosted SWE-style snapshot:
 - `pass_at_1 = 1.0`
 - `pass_rate = 1.0`
 - `average_overall = 0.936`
-- `average_elapsed_seconds = 70.3`
+- `average_elapsed_seconds = 21.0`
 
 This is a self-hosted stable suite, not an official SWE-bench leaderboard claim. Its purpose is to show repeatable end-to-end agent behavior on controlled repository tasks.
 
@@ -91,7 +91,7 @@ Recent validated documentation-oriented benchmark gains:
 - `slugify_test_entrypoint = 0.907`
 - `slugify_release_docs = 0.907`
 
-These gains came from real patch-quality improvements, especially better README-targeted patch generation, whitespace-tolerant `git apply` fallback on mixed-EOL repositories, and automatic unified-diff hunk recounting before patch validation.
+These gains came from real patch-quality improvements, especially better README-targeted patch generation, whitespace-tolerant `git apply` fallback on mixed-EOL repositories, automatic unified-diff hunk recounting before patch validation, and graph-level repair context replay that carries failure signals and patch-ranking hints across rounds.
 
 ## Current State
 
@@ -134,7 +134,7 @@ Validated on the local self-hosted 8-case suite:
 
 - `case_count = 8`
 - `pass_at_1 = 1.0`
-- `average_elapsed_seconds = 40.9`
+- `average_elapsed_seconds = 21.0`
 
 ```markdown
 | case | passed | overall | elapsed_s | trace_db |

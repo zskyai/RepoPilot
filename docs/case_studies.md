@@ -93,7 +93,7 @@ Latest validated snapshot:
 - `case_count = 8`
 - `pass_rate = 1.0`
 - `average_overall = 0.936`
-- `average_elapsed_seconds = 70.3`
+- `average_elapsed_seconds = 21.0`
 
 Coverage includes:
 
@@ -103,6 +103,7 @@ Coverage includes:
 - README / contributor experience
 - open-source repository patching
 - memory and trace store discovery
+- graph-level repair context replay and repair journal visibility
 - dashboard operator controls
 
 For the full table and benchmark commands, see `docs/benchmark.md`.

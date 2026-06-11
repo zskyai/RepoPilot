@@ -35,8 +35,15 @@ class RepoPilotGraphWorkflow:
         use_llm: bool = False,
         require_llm: bool = False,
         max_repair_rounds: int = 2,
+        enable_multi_candidate: bool = True,
+        enable_graph_rerank: bool = True,
     ) -> None:
-        self.base = RepoPilotWorkflow(use_llm=use_llm, require_llm=require_llm)
+        self.base = RepoPilotWorkflow(
+            use_llm=use_llm,
+            require_llm=require_llm,
+            enable_multi_candidate=enable_multi_candidate,
+            enable_graph_rerank=enable_graph_rerank,
+        )
         self.max_repair_rounds = max_repair_rounds
         self.graph = self._build_graph()
 
@@ -50,11 +57,14 @@ class RepoPilotGraphWorkflow:
         create_pr: bool = False,
         poll_ci: bool = False,
         ci_feedback: bool = False,
+        auto_repair_ci: bool = False,
+        auto_sync_repair: bool = False,
         use_memory: bool = True,
         save_memory: bool = True,
         pr_number: int | None = None,
         comment_body: str = "",
         require_approval: bool = True,
+        resume_run_id: str = "",
     ) -> RepoDiagnosisResult:
         repo = Path(repo_path).resolve()
         configured_trace_db = os.getenv("REPOPILOT_TRACE_DB", "").strip()
@@ -62,7 +72,8 @@ class RepoPilotGraphWorkflow:
         if not trace_db_path.is_absolute():
             trace_db_path = repo / trace_db_path
         approval_db_path = repo / ".repopilot" / "approvals.sqlite3"
-        graph_run_id = str(uuid4())
+        graph_run_id = resume_run_id or str(uuid4())
+        graph_thread_id = f"repopilot:{repo.name}:{graph_run_id}"
         approval_gate = self._approval_gate(
             approval_db_path=approval_db_path,
             graph_run_id=graph_run_id,
@@ -77,12 +88,15 @@ class RepoPilotGraphWorkflow:
             "payload": {
                 "repo_path": repo,
                 "issue": issue,
+                "original_issue": issue,
                 "run_tests": run_tests,
                 "apply_sandbox": apply_sandbox,
                 "apply_worktree": apply_worktree,
                 "create_pr": create_pr,
                 "poll_ci": poll_ci,
                 "ci_feedback": ci_feedback,
+                "auto_repair_ci": auto_repair_ci,
+                "auto_sync_repair": auto_sync_repair,
                 "use_memory": use_memory,
                 "save_memory": save_memory,
                 "pr_number": pr_number,
@@ -90,9 +104,12 @@ class RepoPilotGraphWorkflow:
                 "repair_round": 0,
                 "graph_trace": [],
                 "graph_run_id": graph_run_id,
+                "graph_thread_id": graph_thread_id,
                 "trace_db_path": str(trace_db_path),
                 "approval_db_path": str(approval_db_path),
                 "approval_gate": approval_gate,
+                "resume_run_id": resume_run_id,
+                "repair_context": {},
             }
         }
         final = self.graph.invoke(state) if hasattr(self.graph, "invoke") else self.graph.run(state)
@@ -105,8 +122,11 @@ class RepoPilotGraphWorkflow:
         )
         result.task.analysis["graph_trace"] = payload.get("graph_trace", [])
         result.task.analysis["graph_run_id"] = payload.get("graph_run_id")
+        result.task.analysis["graph_thread_id"] = payload.get("graph_thread_id")
         result.task.analysis["trace_db_path"] = payload.get("trace_db_path")
         result.task.analysis["approval_gate"] = payload.get("approval_gate")
+        result.task.analysis["resumed_from_checkpoint"] = bool(payload.get("resume_run_id"))
+        result.task.analysis["checkpoint_state"] = self._approval_store(payload).latest_checkpoint(payload.get("graph_run_id", ""))
         result.task.analysis["persistent_trace"] = self._trace_store(payload).read_run(payload.get("graph_run_id", ""))
         result.task.analysis["repair_rounds"] = payload.get("repair_round", 0)
         result.task.add_trace("state_graph", "finish", nodes=[item["node"] for item in payload.get("graph_trace", [])])
@@ -164,17 +184,21 @@ class RepoPilotGraphWorkflow:
             payload["graph_trace"].append({"node": "act"})
             payload["result"] = self.base.run(
                 payload["repo_path"],
-                payload["issue"],
+                payload.get("original_issue") or payload["issue"],
                 run_tests=payload["run_tests"],
                 apply_sandbox=payload.get("apply_sandbox", False),
                 apply_worktree=payload.get("apply_worktree", False),
                 create_pr=payload.get("create_pr", False),
                 poll_ci=payload.get("poll_ci", False),
                 ci_feedback=payload.get("ci_feedback", False),
+                auto_repair_ci=payload.get("auto_repair_ci", False),
+                auto_sync_repair=payload.get("auto_sync_repair", False),
                 use_memory=payload.get("use_memory", True),
                 save_memory=payload.get("save_memory", True),
                 pr_number=payload.get("pr_number"),
                 comment_body=payload.get("comment_body", ""),
+                repair_context=payload.get("repair_context") or None,
+                original_issue=payload.get("original_issue") or payload["issue"],
             )
         return {"payload": payload}
 
@@ -186,12 +210,21 @@ class RepoPilotGraphWorkflow:
             result: RepoDiagnosisResult = payload["result"]
             evaluation = result.task.evaluation
             scores = evaluation.get("scores", {})
-            tests_ok = scores.get("executed_tests", 0) >= 1.0 if payload.get("run_tests") else True
+            if payload.get("run_tests"):
+                executed_test_score = float(scores.get("executed_tests", 0) or 0)
+                tests_ok = executed_test_score >= 1.0 or (
+                    evaluation.get("passed", False)
+                    and scores.get("patch_apply_check", 0) >= 1.0
+                    and executed_test_score >= 0.75
+                )
+            else:
+                tests_ok = True
             payload["verified"] = (
                 scores.get("patch_apply_check", 0) >= 1.0
                 and tests_ok
                 and evaluation.get("passed", False)
             )
+            payload["last_repair_context"] = self._build_repair_context_from_result(result, payload)
         return {"payload": payload}
 
     def _repair(self, state: dict[str, Any]) -> dict[str, Any]:
@@ -200,10 +233,8 @@ class RepoPilotGraphWorkflow:
             self._approval_store(payload).checkpoint(payload["graph_run_id"], "repair", payload)
             payload["graph_trace"].append({"node": "repair"})
             payload["repair_round"] = int(payload.get("repair_round", 0)) + 1
-            payload["issue"] = (
-                payload["issue"]
-                + "\nPrevious validation failed. Generate a smaller patch using patch-check, test, and judge feedback."
-            )
+            payload["repair_context"] = dict(payload.get("last_repair_context") or {})
+            payload["issue"] = payload.get("original_issue") or payload["issue"]
         return {"payload": payload}
 
     def _judge(self, state: dict[str, Any]) -> dict[str, Any]:
@@ -233,6 +264,74 @@ class RepoPilotGraphWorkflow:
 
     def _approval_store(self, payload: dict[str, Any]) -> ApprovalStore:
         return ApprovalStore(payload["approval_db_path"])
+
+    def _build_repair_context_from_result(
+        self,
+        result: RepoDiagnosisResult,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        analysis = result.task.analysis
+        selected_patch = (analysis.get("selected_patch") or {}).get("selected") or {}
+        patch_portfolio = analysis.get("patch_portfolio") or {}
+        failure_signals = analysis.get("failure_signals") or []
+        learned_policy = analysis.get("learned_repair_policy") or {}
+        repair_context = {
+            "repair_round": int(payload.get("repair_round", 0) or 0) + 1,
+            "previous_overall": result.task.evaluation.get("overall"),
+            "previous_passed": result.task.evaluation.get("passed"),
+            "strategy": "",
+            "summary_lines": [],
+            "target_files": [],
+            "failure_signals": failure_signals[:8],
+            "top_patch_candidates": [],
+            "memory_hits": (analysis.get("memory_hits") or [])[:3],
+        }
+        repair_journal = analysis.get("repair_journal") or []
+        if repair_journal:
+            latest = repair_journal[-1]
+            repair_context["strategy"] = str(latest.get("strategy") or "")
+            repair_context["target_files"] = list(latest.get("target_files") or [])[:6]
+            repair_context["summary_lines"] = [
+                f"latest_strategy={latest.get('strategy', '')}",
+                f"latest_family={latest.get('primary_family', '')}",
+                f"failed_stages={', '.join(latest.get('failed_stages', [])[:4])}",
+            ]
+        else:
+            repair_context["target_files"] = list((analysis.get("suspected_files") or [])[:6])
+        candidates = patch_portfolio.get("top_candidates") or []
+        if selected_patch:
+            repair_context["top_patch_candidates"].append(selected_patch)
+        for item in candidates[:3]:
+            if item not in repair_context["top_patch_candidates"]:
+                repair_context["top_patch_candidates"].append(item)
+        if learned_policy.get("summary_lines"):
+            repair_context["summary_lines"].extend(str(item) for item in learned_policy.get("summary_lines", [])[:4])
+        repair_context["summary_lines"] = list(dict.fromkeys(item for item in repair_context["summary_lines"] if item))[:8]
+        return repair_context
+
+    def _issue_for_repair_round(self, payload: dict[str, Any]) -> str:
+        base_issue = payload.get("original_issue") or payload["issue"]
+        repair_context = payload.get("repair_context") or {}
+        lines = [
+            base_issue,
+            "",
+            f"Repair round: {payload.get('repair_round', 0)}",
+            "Previous validation failed. Generate a smaller patch using patch-check, test, and judge feedback.",
+        ]
+        if repair_context.get("strategy"):
+            lines.append(f"Repair strategy: {repair_context['strategy']}")
+        if repair_context.get("target_files"):
+            lines.append("Target files: " + ", ".join(repair_context.get("target_files", [])[:6]))
+        for item in (repair_context.get("failure_signals") or [])[:5]:
+            if not isinstance(item, dict):
+                continue
+            lines.append(
+                "Failure signal: "
+                f"{item.get('source', '')}:{item.get('kind', '')} "
+                f"{item.get('path', '')}:{item.get('line', '')} "
+                f"{str(item.get('message') or '')[:220]}"
+            )
+        return "\n".join(lines)
 
     def _approval_gate(
         self,

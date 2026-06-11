@@ -20,7 +20,7 @@ from app.core.llm import LLMClient, build_llm
 from app.core.memory_store import MemoryStore
 from app.core.models import Evidence, ResearchTask, TaskStatus
 from app.core.retrieval import RetrievalScore, build_embedding_client, cosine_similarity, resilient_embed_texts
-from app.core.repair_loop import FailureParser, PatchSelector
+from app.core.repair_loop import FailureParser, FailureSignal, PatchSelector
 from app.core.vector_store import InMemoryVectorStore, VectorStore, build_vector_store
 from app.rag.index import tokenize
 
@@ -842,13 +842,26 @@ class RepoPilotWorkflow:
         save_memory: bool = True,
         pr_number: int | None = None,
         comment_body: str = "",
+        repair_context: dict[str, Any] | None = None,
+        original_issue: str = "",
     ) -> RepoDiagnosisResult:
         repo = Path(repo_path).resolve()
-        task = ResearchTask(query=issue, user_type="software_engineer")
+        base_issue = original_issue or issue
+        task = ResearchTask(query=base_issue, user_type="software_engineer")
         task.mark(TaskStatus.RUNNING)
         task.add_trace("scenario", "start", scenario="repo_pilot", repo=str(repo))
         memory_store = MemoryStore(repo / ".repopilot" / "memory.sqlite3")
-        memory_hits = memory_store.search(issue, repo_path=str(repo), top_k=3) if use_memory else []
+        memory_hits = memory_store.search(base_issue, repo_path=str(repo), top_k=3) if use_memory else []
+        normalized_repair_context = self._normalize_repair_context(repair_context)
+        memory_hits = self._filter_memory_hits(memory_hits, allow_repair_runs=bool(normalized_repair_context))
+        if normalized_repair_context:
+            memory_hits = self._merge_repair_context_memory_hits(memory_hits, normalized_repair_context)
+            task.add_trace(
+                "repair_context",
+                "load",
+                target_files=len(normalized_repair_context.get("target_files", [])),
+                failure_signals=len(normalized_repair_context.get("failure_signals", [])),
+            )
         learned_repair_policy = self._learn_from_memory_hits(memory_hits)
         if memory_hits:
             task.add_trace("memory_store", "recall", hits=len(memory_hits))
@@ -872,7 +885,8 @@ class RepoPilotWorkflow:
             code_graph=code_graph,
             enable_graph_rerank=self.enable_graph_rerank,
         )
-        evidence = retriever.search(issue, top_k=8)
+        retrieval_issue = self._issue_with_repair_context(issue, normalized_repair_context)
+        evidence = retriever.search(retrieval_issue, top_k=8)
         context_packet = retriever.build_context_packet(evidence)
         impacted_files = retriever.predict_impacted_files(evidence)
         task.evidence = evidence
@@ -884,10 +898,11 @@ class RepoPilotWorkflow:
             embedding_provider=retriever.embedding_provider,
         )
 
-        suspected_files = self._suspected_files(evidence, issue=issue, repo=repo)
-        intent_packet = self._infer_intent_packet(issue, evidence)
+        suspected_files = self._suspected_files(evidence, issue=base_issue, repo=repo)
+        suspected_files = self._merge_target_files(suspected_files, normalized_repair_context.get("target_files", []))
+        intent_packet = self._infer_intent_packet(base_issue, evidence)
         if self.intent_agent:
-            llm_intent = self.intent_agent.run(issue, evidence)
+            llm_intent = self.intent_agent.run(retrieval_issue, evidence)
             if llm_intent:
                 intent_packet = self._merge_intent_packet(intent_packet, llm_intent)
                 task.add_trace("intent_llm_agent", "finish", request_type=intent_packet.get("request_type", "unknown"))
@@ -904,29 +919,33 @@ class RepoPilotWorkflow:
                     "finish",
                     sub_tasks=len(implementation_blueprint.get("sub_tasks", [])),
                 )
-        root_cause = self._root_cause(issue, evidence)
+        root_cause = self._root_cause(base_issue, evidence)
         if memory_hits:
             root_cause = root_cause + "\n\n历史相似案例提示:\n" + self._format_memory_hits(memory_hits)
         if learned_repair_policy.get("summary_lines"):
             root_cause = root_cause + "\n\n历史修复策略提示:\n" + "\n".join(learned_repair_policy["summary_lines"])
+        if normalized_repair_context:
+            root_cause = root_cause + "\n\n当前修复上下文:\n" + self._format_repair_context(normalized_repair_context)
         if self.root_cause_agent:
             memory_context = "\n\nMemory context:\n" + self._format_memory_hits(memory_hits) if memory_hits else ""
             if learned_repair_policy.get("summary_lines"):
                 memory_context += "\n\nRepair policy context:\n" + "\n".join(learned_repair_policy["summary_lines"])
+            if normalized_repair_context:
+                memory_context += "\n\nRepair context:\n" + self._format_repair_context(normalized_repair_context)
             memory_context += "\n\nCompressed repo context:\n" + self._format_context_packet(context_packet)
-            root_cause = self.root_cause_agent.run(issue + memory_context, evidence)
+            root_cause = self.root_cause_agent.run(retrieval_issue + memory_context, evidence)
             task.add_trace("root_cause_llm_agent", "finish", model="openai_compatible")
-        change_plan = self._change_plan(issue, evidence, root_cause)
+        change_plan = self._change_plan(base_issue, evidence, root_cause)
         if self.patch_planner_agent:
             change_plan = self.patch_planner_agent.run(
-                issue,
+                retrieval_issue,
                 root_cause,
                 evidence,
                 intent_packet=intent_packet,
                 implementation_blueprint=implementation_blueprint,
             )
             task.add_trace("patch_planner_llm_agent", "finish", steps=len(change_plan))
-        test_plan = self._test_plan(repo, issue, suspected_files)
+        test_plan = self._test_plan(repo, base_issue, suspected_files)
         implementation_blueprint = self._merge_implementation_blueprint(
             implementation_blueprint,
             {"verification_steps": test_plan[:4]},
@@ -934,9 +953,9 @@ class RepoPilotWorkflow:
         atomic_change_bundle = self._atomic_change_bundle(coordination_plan, test_plan)
         execution_units = self._execution_units(implementation_blueprint, coordination_waves)
         acceptance_bundle = self._acceptance_bundle(intent_packet, implementation_blueprint, atomic_change_bundle)
-        risk_items = self._risk_review(issue, suspected_files)
+        risk_items = self._risk_review(base_issue, suspected_files)
         patch_suggestions = self._patch_suggestions(
-            issue,
+            retrieval_issue,
             suspected_files,
             root_cause,
             implementation_blueprint=implementation_blueprint,
@@ -946,7 +965,7 @@ class RepoPilotWorkflow:
         )
         if self.patch_suggestion_agent:
             patch_suggestions = self.patch_suggestion_agent.run(
-                issue,
+                retrieval_issue,
                 root_cause,
                 evidence,
                 intent_packet=intent_packet,
@@ -966,7 +985,7 @@ class RepoPilotWorkflow:
         patch_checks = self._check_patches(repo, patch_suggestions, coordination_plan=coordination_plan)
         if patch_suggestions and not any(item.get("passed") for item in patch_checks):
             fallback = self._patch_suggestions(
-                issue,
+                retrieval_issue,
                 suspected_files,
                 root_cause,
                 implementation_blueprint=implementation_blueprint,
@@ -994,7 +1013,7 @@ class RepoPilotWorkflow:
                 sandbox_runs,
             ) = self._repair_patch_in_sandbox(
                 repo=repo,
-                issue=issue,
+                issue=base_issue,
                 root_cause=root_cause,
                 evidence=evidence,
                 suspected_files=suspected_files,
@@ -1004,6 +1023,7 @@ class RepoPilotWorkflow:
                 patch_checks=patch_checks,
                 max_rounds=3,
                 learned_repair_policy=learned_repair_policy,
+                repair_context=normalized_repair_context,
             )
         if apply_worktree:
             worktree_runs = self._apply_patch_to_worktree(repo, patch_checks, sandbox_runs)
@@ -1011,7 +1031,7 @@ class RepoPilotWorkflow:
         if self.repair_advisor_agent and test_runs:
             second_pass = self.repair_advisor_agent.run(test_runs)
             task.add_trace("repair_advisor_llm_agent", "finish", advice=len(second_pass))
-        pr_plan = self._pr_plan(repo, issue, patch_suggestions, test_runs)
+        pr_plan = self._pr_plan(repo, base_issue, patch_suggestions, test_runs)
         github_result = self._run_github_actions(
             repo=repo,
             pr_plan=pr_plan,
@@ -1095,6 +1115,7 @@ class RepoPilotWorkflow:
             "memory_hits": memory_hits,
             "learned_repair_policy": learned_repair_policy,
             "context_packet": context_packet,
+            "repair_context": normalized_repair_context,
         }
         task.report = self._report(task, repo, issue)
         self._judge(task)
@@ -1126,7 +1147,7 @@ class RepoPilotWorkflow:
             memory_id = memory_store.save_from_payload(RepoDiagnosisResult(
                 task=task,
                 repo_path=str(repo),
-                issue=issue,
+                issue=base_issue,
                 suspected_files=suspected_files,
                 change_plan=change_plan,
                 test_plan=test_plan,
@@ -1144,7 +1165,7 @@ class RepoPilotWorkflow:
         return RepoDiagnosisResult(
             task=task,
             repo_path=str(repo),
-            issue=issue,
+            issue=base_issue,
             suspected_files=suspected_files,
             change_plan=change_plan,
             test_plan=test_plan,
@@ -1180,6 +1201,149 @@ class RepoPilotWorkflow:
         for item in context_packet.get("snippets", [])[:4]:
             lines.append(f"- {item.get('title')} :: {item.get('summary')}")
         return "\n".join(lines)
+
+    def _normalize_repair_context(self, repair_context: dict[str, Any] | None) -> dict[str, Any]:
+        if not isinstance(repair_context, dict):
+            return {}
+        normalized: dict[str, Any] = {
+            "previous_overall": repair_context.get("previous_overall"),
+            "previous_passed": repair_context.get("previous_passed"),
+            "strategy": str(repair_context.get("strategy") or "").strip(),
+            "repair_round": int(repair_context.get("repair_round", 0) or 0),
+            "summary_lines": [str(item) for item in (repair_context.get("summary_lines") or []) if str(item).strip()][:8],
+            "failure_signals": [],
+            "target_files": [],
+            "top_patch_candidates": [],
+            "memory_hits": [],
+        }
+        seen_targets: list[str] = []
+        for item in repair_context.get("target_files") or []:
+            path = str(item or "").replace("\\", "/").strip()
+            if path and path not in seen_targets:
+                seen_targets.append(path)
+        normalized["target_files"] = seen_targets[:8]
+        for item in (repair_context.get("failure_signals") or [])[:12]:
+            if not isinstance(item, dict):
+                continue
+            normalized["failure_signals"].append(
+                {
+                    "source": str(item.get("source") or ""),
+                    "kind": str(item.get("kind") or ""),
+                    "family": str(item.get("family") or ""),
+                    "path": str(item.get("path") or "").replace("\\", "/"),
+                    "line": item.get("line"),
+                    "message": str(item.get("message") or "")[:300],
+                }
+            )
+        for item in (repair_context.get("top_patch_candidates") or [])[:3]:
+            if not isinstance(item, dict):
+                continue
+            normalized["top_patch_candidates"].append(
+                {
+                    "title": str(item.get("title") or ""),
+                    "patch_file": str(item.get("patch_file") or ""),
+                    "score": item.get("score"),
+                    "reason": str(item.get("reason") or "")[:240],
+                }
+            )
+        for item in (repair_context.get("memory_hits") or [])[:3]:
+            if not isinstance(item, dict):
+                continue
+            normalized["memory_hits"].append(
+                {
+                    "id": item.get("id"),
+                    "score": item.get("score"),
+                    "issue": str(item.get("issue") or "")[:180],
+                    "summary": str(item.get("summary") or "")[:240],
+                    "outcome": str(item.get("outcome") or ""),
+                    "payload": item.get("payload") or {},
+                }
+            )
+        return {key: value for key, value in normalized.items() if value not in ("", [], None)}
+
+    def _merge_repair_context_memory_hits(
+        self,
+        memory_hits: list[dict[str, Any]],
+        repair_context: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        merged = list(memory_hits)
+        seen_ids = {str(item.get("id")) for item in merged if item.get("id") is not None}
+        for item in repair_context.get("memory_hits", []):
+            memory_id = str(item.get("id")) if item.get("id") is not None else ""
+            if memory_id and memory_id in seen_ids:
+                continue
+            merged.append(dict(item))
+            if memory_id:
+                seen_ids.add(memory_id)
+        merged.sort(key=lambda item: float(item.get("score", 0.0) or 0.0), reverse=True)
+        return merged[:5]
+
+    def _filter_memory_hits(
+        self,
+        memory_hits: list[dict[str, Any]],
+        *,
+        allow_repair_runs: bool,
+    ) -> list[dict[str, Any]]:
+        if allow_repair_runs:
+            return memory_hits
+        filtered = []
+        markers = ("Repair round:", "Previous validation failed.", "Repair context:")
+        for item in memory_hits:
+            issue = str(item.get("issue") or "")
+            if any(marker in issue for marker in markers):
+                continue
+            filtered.append(item)
+        return filtered or memory_hits[:]
+
+    def _issue_with_repair_context(self, issue: str, repair_context: dict[str, Any]) -> str:
+        if not repair_context:
+            return issue
+        sections = [issue, "", "Repair context:"]
+        if repair_context.get("strategy"):
+            sections.append(f"- strategy: {repair_context['strategy']}")
+        if repair_context.get("previous_overall") is not None:
+            sections.append(f"- previous_overall: {repair_context.get('previous_overall')}")
+        if repair_context.get("target_files"):
+            sections.append(f"- target_files: {', '.join(repair_context['target_files'])}")
+        for item in repair_context.get("failure_signals", [])[:6]:
+            sections.append(
+                f"- failure: {item.get('source')}:{item.get('kind')} "
+                f"{item.get('path')}:{item.get('line') or ''} {item.get('message')}"
+            )
+        return "\n".join(sections)
+
+    def _merge_target_files(self, files: list[str], extra_files: list[str]) -> list[str]:
+        merged: list[str] = []
+        for item in list(files) + [str(path) for path in extra_files]:
+            normalized = str(item or "").replace("\\", "/").strip()
+            if normalized and normalized not in merged:
+                merged.append(normalized)
+        return merged[:8]
+
+    def _format_repair_context(self, repair_context: dict[str, Any]) -> str:
+        if not repair_context:
+            return ""
+        lines: list[str] = []
+        if repair_context.get("strategy"):
+            lines.append(f"- strategy={repair_context.get('strategy')}")
+        if repair_context.get("repair_round"):
+            lines.append(f"- repair_round={repair_context.get('repair_round')}")
+        if repair_context.get("previous_overall") is not None:
+            lines.append(f"- previous_overall={repair_context.get('previous_overall')}")
+        if repair_context.get("target_files"):
+            lines.append(f"- target_files={', '.join(repair_context.get('target_files', [])[:6])}")
+        for item in repair_context.get("summary_lines", [])[:4]:
+            lines.append(f"- {item}")
+        for item in repair_context.get("failure_signals", [])[:4]:
+            lines.append(
+                f"- failure {item.get('source')}:{item.get('kind')} "
+                f"{item.get('path')}:{item.get('line') or ''} {item.get('message')}"
+            )
+        for item in repair_context.get("top_patch_candidates", [])[:2]:
+            lines.append(
+                f"- candidate {item.get('title')} score={item.get('score')} reason={item.get('reason')}"
+            )
+        return "\n".join(lines[:12])
 
     def _suspected_files(self, evidence: list[Evidence], issue: str = "", repo: Path | None = None) -> list[str]:
         files: list[str] = []
@@ -2692,14 +2856,17 @@ index 0000000..1111111
         patch_checks: list[dict[str, Any]],
         max_rounds: int = 3,
         learned_repair_policy: dict[str, Any] | None = None,
+        repair_context: dict[str, Any] | None = None,
     ) -> tuple[list[dict[str, str]], list[dict[str, Any]], list[dict[str, Any]]]:
         all_runs: list[dict[str, Any]] = []
         current_issue = issue
         current_suggestions = patch_suggestions
         current_checks = patch_checks
-        current_failure_signals: list[Any] = []
+        current_failure_signals: list[Any] = self._repair_context_failure_signals(repair_context)
         for round_id in range(1, max_rounds + 1):
             round_plan = self.failure_parser.summarize(current_failure_signals)
+            if repair_context and round_id == 1:
+                round_plan = self._merge_round_plan_with_repair_context(round_plan, repair_context)
             all_runs.append(
                 {
                     "stage": "repair_plan",
@@ -2712,6 +2879,7 @@ index 0000000..1111111
                             f"strategy={round_plan.get('strategy')}",
                             f"primary_family={round_plan.get('primary_family')}",
                             f"target_files={', '.join(round_plan.get('target_files', []))}",
+                            f"context_candidates={len((repair_context or {}).get('top_patch_candidates', []))}",
                         ]
                     ),
                     "stderr": "",
@@ -2748,6 +2916,7 @@ index 0000000..1111111
                 round_plan=round_plan,
                 round_id=round_id,
                 learned_repair_policy=learned_repair_policy or {},
+                repair_context=repair_context or {},
             )
             if self.patch_suggestion_agent:
                 current_suggestions = self.patch_suggestion_agent.run(current_issue, root_cause, evidence)
@@ -2766,6 +2935,7 @@ index 0000000..1111111
                             f"candidate_patches={len(current_suggestions)}",
                             f"applyable_patches={sum(1 for item in current_checks if item.get('passed'))}",
                             f"strategy={round_plan.get('strategy')}",
+                            f"target_files={', '.join(round_plan.get('target_files', []))}",
                         ]
                     ),
                     "stderr": "",
@@ -2783,6 +2953,7 @@ index 0000000..1111111
         round_plan: dict[str, Any],
         round_id: int,
         learned_repair_policy: dict[str, Any],
+        repair_context: dict[str, Any],
     ) -> str:
         issue = self._patch_issue_with_failure_context(base_issue, sandbox_runs, round_id)
         if parsed_failures:
@@ -2801,7 +2972,56 @@ index 0000000..1111111
         )
         if learned_repair_policy.get("summary_lines"):
             issue += "\nHistorical repair learning:\n" + "\n".join(learned_repair_policy["summary_lines"])
+        if repair_context:
+            issue += "\nRepair replay context:\n" + self._format_repair_context(repair_context)
         return issue
+
+    def _repair_context_failure_signals(self, repair_context: dict[str, Any] | None) -> list[Any]:
+        if not repair_context:
+            return []
+        signals: list[Any] = []
+        for item in repair_context.get("failure_signals", []):
+            if not isinstance(item, dict):
+                continue
+            signals.append(
+                FailureSignal(
+                    source=str(item.get("source") or "repair_context"),
+                    kind=str(item.get("kind") or "context_failure"),
+                    message=str(item.get("message") or ""),
+                    family=str(item.get("family") or ""),
+                    path=str(item.get("path") or ""),
+                    line=item.get("line"),
+                    command="repair_context",
+                    raw=str(item),
+                )
+            )
+        return signals
+
+    def _merge_round_plan_with_repair_context(
+        self,
+        round_plan: dict[str, Any],
+        repair_context: dict[str, Any],
+    ) -> dict[str, Any]:
+        merged = dict(round_plan)
+        target_files = self._merge_target_files(
+            round_plan.get("target_files", []) or [],
+            repair_context.get("target_files", []) or [],
+        )
+        merged["target_files"] = target_files[:6]
+        if repair_context.get("strategy"):
+            merged["strategy"] = repair_context.get("strategy")
+        if repair_context.get("failure_signals"):
+            primary_family = str(repair_context["failure_signals"][0].get("family") or "").strip()
+            primary_kind = str(repair_context["failure_signals"][0].get("kind") or "").strip()
+            if primary_family:
+                merged["primary_family"] = primary_family
+            if primary_kind:
+                merged["primary_kind"] = primary_kind
+        summary_lines = list(round_plan.get("summary_lines", []) or [])
+        if repair_context.get("summary_lines"):
+            summary_lines.extend(str(item) for item in repair_context.get("summary_lines", []) if str(item).strip())
+        merged["summary_lines"] = list(dict.fromkeys(summary_lines))[:8]
+        return merged
 
     def _repair_journal(self, sandbox_runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
         journal: list[dict[str, Any]] = []
@@ -3170,6 +3390,12 @@ index 0000000..1111111
 ## Patch 组合评估
 {self._format_patch_portfolio(task.analysis.get("patch_portfolio", {}))}
 
+## Repair Context
+{self._format_repair_context(task.analysis.get("repair_context", {})) or "无外部 repair context。"}
+
+## Repair Journal
+{self._format_repair_journal(task.analysis.get("repair_journal", []))}
+
 ## 测试计划
 {chr(10).join(f"{idx}. {item}" for idx, item in enumerate(task.analysis["test_plan"], start=1))}
 
@@ -3254,6 +3480,21 @@ index 0000000..1111111
                 f"coordination={item.get('coordination_score')} "
                 f"sandbox_pass_count={item.get('sandbox_pass_count')} "
                 f"changed_lines={item.get('changed_lines')}"
+            )
+        return "\n".join(lines)
+
+    def _format_repair_journal(self, repair_journal: list[dict[str, Any]]) -> str:
+        if not repair_journal:
+            return "No repair rounds recorded."
+        lines = []
+        for item in repair_journal:
+            lines.append(
+                f"- round={item.get('repair_round')} "
+                f"strategy={item.get('strategy')} "
+                f"family={item.get('primary_family')} "
+                f"passed={item.get('passed')} "
+                f"targets={', '.join(item.get('target_files', [])[:4])} "
+                f"failed_stages={', '.join(item.get('failed_stages', [])[:4])}"
             )
         return "\n".join(lines)
 

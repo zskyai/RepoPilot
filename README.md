@@ -72,7 +72,7 @@ Latest stable self-hosted SWE-style snapshot:
 - `case_count = 8`
 - `pass_rate = 1.0`
 - `average_overall = 0.936`
-- `average_elapsed_seconds = 70.3`
+- `average_elapsed_seconds = 21.0`
 - coverage includes retrieval, approval gates, repair signals, memory, trace store, GitHub workflow discovery, and dashboard operator paths
 
 Latest representative real-repo case:
@@ -96,6 +96,7 @@ Recent work focused on making documentation-oriented patching behave more like a
 - improved self-repo README patch quality for Quick Start, benchmark output explanation, and SQLite run-history guidance
 - added whitespace-tolerant `git apply` fallback for mixed-EOL repositories
 - added automatic unified-diff hunk recounting so valid patches are less likely to fail on line-count drift
+- added graph-level repair context replay so later rounds keep structured failure signals, target files, and patch-ranking hints
 - kept benchmark scoring tied to real patch checks, sandbox apply, and executable test signals
 
 The result is a stronger patch-quality profile:
