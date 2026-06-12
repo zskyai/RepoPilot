@@ -20,6 +20,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
 experimental = ["tree-sitter-language-pack>=1.8"]
+benchmark = ["datasets>=2.19"]
 
 [tool.setuptools.packages.find]
 include = ["app*"]

@@ -51,7 +51,21 @@ To compare no-graph retrieval against the new graph-enhanced rerank and impact p
 To run the SWE-bench style evaluator:
 
 ```powershell
-.\.venv\Scripts\python.exe run_swe_bench_style.py --cases benchmarks\swe_style_cases.json --work-dir .repopilot\swe_runs --max-cases 8
+.\.venv\Scripts\python.exe run_swe_bench_style.py --cases benchmarks\swe_style_cases.json --work-dir .repopilot\swe_runs --max-cases 11 --write-json .repopilot\reports\public_eval_latest.json --write-markdown .repopilot\reports\public_eval_latest.md
+```
+
+To run RepoPilot against official/public SWE-bench instances and export harness-compatible predictions:
+
+```powershell
+.\.venv\Scripts\python.exe run_swe_bench_style.py --cases benchmarks\swe_style_cases.json --dataset-path path\to\official_swe_bench.jsonl --dataset-name princeton-nlp/SWE-bench_Verified --dataset-split test --instance-id django__django-16527 --write-preds .repopilot\reports\all_preds.jsonl --write-json .repopilot\reports\official_eval_summary.json
+```
+
+`--dataset-path` accepts local `json`, `jsonl`, or `parquet` exports.
+
+The exported `all_preds.jsonl` is meant to be scored by the official SWE-bench harness, for example:
+
+```powershell
+python -m swebench.harness.run_evaluation --dataset_name princeton-nlp/SWE-bench_Verified --split test --predictions_path .repopilot\reports\all_preds.jsonl
 ```
 
 ## Output
@@ -64,9 +78,13 @@ The benchmark outputs:
 - per-case `scores`
 - optional baseline-vs-candidate deltas
 - `pass_at_1` for SWE-style runs
+- `adjusted_pass_at_1` for environment-limited SWE-style runs
 - external repo test results
+- cross-file expected-path recall and repair-context usage
 - `graph_run_id` and `trace_db_path`
 - a markdown summary table for README / report reuse
+- a public markdown summary for GitHub / benchmark reporting
+- official-harness-compatible `all_preds.jsonl` prediction export for public SWE-bench evaluation
 
 ## Public Snapshot
 
@@ -79,6 +97,8 @@ Current public self-hosted SWE-style snapshot:
 - `average_elapsed_seconds = 21.0`
 
 This is a self-hosted stable suite, not an official SWE-bench leaderboard claim. Its purpose is to show repeatable end-to-end agent behavior on controlled repository tasks.
+
+For a public benchmark that is actually recognized in the coding-agent field, use the official SWE-bench path above. RepoPilot now supports loading official instances and exporting harness-compatible predictions, but the authoritative pass rate must still come from the official harness environment.
 
 Recent validated documentation-oriented benchmark gains:
 
@@ -127,24 +147,40 @@ The current local cases focus on:
 - memory store discovery
 - persistent trace and checkpoint discovery
 - dashboard operator controls
+- cross-file repair-context replay
+- cross-file patch-portfolio coordination
+- public-eval metric aggregation and markdown export
 
 ## Latest SWE-Style Results
 
-Validated on the local self-hosted 8-case suite:
+Validated on the local self-hosted 11-case suite:
 
-- `case_count = 8`
-- `pass_at_1 = 1.0`
-- `average_elapsed_seconds = 21.0`
+- `case_count = 11`
+- `strict_pass_at_1 = 0.0`
+- `env_adjusted_pass_at_1 = 1.0`
+- `average_overall = 0.954`
+- `average_elapsed_seconds = 27.76`
+- `cross_file_case_count = 3`
+- `cross_file_pass_rate = 1.0`
+- `expected_path_hit_rate = 0.0`
+- `average_expected_path_recall = 0.5`
+- `repair_context_usage_rate = 1.0`
+- `environment_limited_case_count = 11`
+
+The strict pass rate is `0.0` on this machine because copied SWE-style sandboxes currently lack `pytest`. RepoPilot now reports that limitation explicitly and also surfaces an environment-adjusted pass rate so the agent signal is still visible.
 
 ```markdown
-| case | passed | overall | elapsed_s | trace_db |
-|---|---:|---:|---:|---|
-| repopilot_self_retrieval_smoke | yes | 0.967 | 77.19 | `F:\agent 项目\enterprise_agent_platform\.repopilot\swe_full\repopilot_self_retrieval_smoke\.repopilot\traces.sqlite3` |
-| repopilot_self_approval_gate | yes | 0.967 | 63.45 | `F:\agent 项目\enterprise_agent_platform\.repopilot\swe_full\repopilot_self_approval_gate\.repopilot\traces.sqlite3` |
-| repopilot_self_repair_signals | yes | 0.967 | 46.31 | `F:\agent 项目\enterprise_agent_platform\.repopilot\swe_full\repopilot_self_repair_signals\.repopilot\traces.sqlite3` |
-| repopilot_self_swe_runner | yes | 0.967 | 24.64 | `F:\agent 项目\enterprise_agent_platform\.repopilot\swe_full\repopilot_self_swe_runner\.repopilot\traces.sqlite3` |
-| repopilot_self_github_workflow | yes | 0.967 | 27.66 | `F:\agent 项目\enterprise_agent_platform\.repopilot\swe_full\repopilot_self_github_workflow\.repopilot\traces.sqlite3` |
-| repopilot_self_memory_store | yes | 0.967 | 28.29 | `F:\agent 项目\enterprise_agent_platform\.repopilot\swe_full\repopilot_self_memory_store\.repopilot\traces.sqlite3` |
-| repopilot_self_trace_store | yes | 0.967 | 31.91 | `F:\agent 项目\enterprise_agent_platform\.repopilot\swe_full\repopilot_self_trace_store\.repopilot\traces.sqlite3` |
-| repopilot_self_dashboard | yes | 0.967 | 27.76 | `F:\agent 项目\enterprise_agent_platform\.repopilot\swe_full\repopilot_self_dashboard\.repopilot\traces.sqlite3` |
+| case | strict | adjusted | overall | elapsed_s | repair_rounds | path_recall | trace_db |
+|---|---:|---:|---:|---:|---:|---:|---|
+| repopilot_self_retrieval_smoke | no | yes | 0.954 | 39.28 | 0 | 0.0 | `F:\agent 项目\enterprise_agent_platform\.repopilot\swe_bench_runs\repopilot_self_retrieval_smoke\.repopilot\traces.sqlite3` |
+| repopilot_self_approval_gate | no | yes | 0.954 | 26.99 | 0 | 0.0 | `F:\agent 项目\enterprise_agent_platform\.repopilot\swe_bench_runs\repopilot_self_approval_gate\.repopilot\traces.sqlite3` |
+| repopilot_self_repair_signals | no | yes | 0.954 | 22.44 | 0 | 0.0 | `F:\agent 项目\enterprise_agent_platform\.repopilot\swe_bench_runs\repopilot_self_repair_signals\.repopilot\traces.sqlite3` |
+| repopilot_self_swe_runner | no | yes | 0.954 | 19.82 | 0 | 0.0 | `F:\agent 项目\enterprise_agent_platform\.repopilot\swe_bench_runs\repopilot_self_swe_runner\.repopilot\traces.sqlite3` |
+| repopilot_self_github_workflow | no | yes | 0.954 | 25.86 | 0 | 0.0 | `F:\agent 项目\enterprise_agent_platform\.repopilot\swe_bench_runs\repopilot_self_github_workflow\.repopilot\traces.sqlite3` |
+| repopilot_self_memory_store | no | yes | 0.954 | 24.60 | 0 | 0.0 | `F:\agent 项目\enterprise_agent_platform\.repopilot\swe_bench_runs\repopilot_self_memory_store\.repopilot\traces.sqlite3` |
+| repopilot_self_trace_store | no | yes | 0.954 | 27.88 | 0 | 0.0 | `F:\agent 项目\enterprise_agent_platform\.repopilot\swe_bench_runs\repopilot_self_trace_store\.repopilot\traces.sqlite3` |
+| repopilot_self_dashboard | no | yes | 0.954 | 23.34 | 0 | 0.0 | `F:\agent 项目\enterprise_agent_platform\.repopilot\swe_bench_runs\repopilot_self_dashboard\.repopilot\traces.sqlite3` |
+| repopilot_self_cross_file_repair_context | no | yes | 0.954 | 32.83 | 0 | 0.5 | `F:\agent 项目\enterprise_agent_platform\.repopilot\swe_bench_runs\repopilot_self_cross_file_repair_context\.repopilot\traces.sqlite3` |
+| repopilot_self_cross_file_patch_portfolio | no | yes | 0.954 | 32.44 | 0 | 0.5 | `F:\agent 项目\enterprise_agent_platform\.repopilot\swe_bench_runs\repopilot_self_cross_file_patch_portfolio\.repopilot\traces.sqlite3` |
+| repopilot_self_public_eval_reporting | no | yes | 0.954 | 29.93 | 0 | 0.5 | `F:\agent 项目\enterprise_agent_platform\.repopilot\swe_bench_runs\repopilot_self_public_eval_reporting\.repopilot\traces.sqlite3` |
 ```

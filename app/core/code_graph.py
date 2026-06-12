@@ -51,6 +51,98 @@ class CodeGraph:
     def file_context(self, path: str) -> dict[str, Any]:
         return self.files.get(path, {})
 
+    def neighbors(self, path: str) -> list[str]:
+        related: list[str] = []
+        symbol_to_path = {symbol.name: symbol.path for symbol in self.symbols}
+        for relation in self.relations:
+            if relation.path == path:
+                target_path = symbol_to_path.get(relation.target, "")
+                if target_path and target_path != path and target_path not in related:
+                    related.append(target_path)
+        imports = self.files.get(path, {}).get("imports", []) or []
+        file_names = {item_path.split("/")[-1].split(".")[0]: item_path for item_path in self.files}
+        for entry in imports:
+            tokens = entry.replace(",", " ").replace(";", " ").split()
+            for token in tokens:
+                normalized = token.strip().split(".")[-1]
+                target_path = file_names.get(normalized, "")
+                if target_path and target_path != path and target_path not in related:
+                    related.append(target_path)
+        return related
+
+    def impact_subgraph(self, seed_paths: list[str], max_hops: int = 2) -> dict[str, Any]:
+        normalized = [path.replace("\\", "/") for path in seed_paths if path]
+        frontier = normalized[:]
+        visited = set(normalized)
+        edges: list[dict[str, Any]] = []
+        for hop in range(1, max_hops + 1):
+            next_frontier: list[str] = []
+            for path in frontier:
+                for neighbor in self.neighbors(path):
+                    if neighbor not in visited:
+                        visited.add(neighbor)
+                        next_frontier.append(neighbor)
+                    edges.append({"source": path, "target": neighbor, "hop": hop})
+            frontier = next_frontier
+            if not frontier:
+                break
+        return {
+            "seed_paths": normalized,
+            "nodes": list(visited),
+            "edges": edges,
+        }
+
+    def path_distance(self, seed_paths: list[str], target_path: str, max_hops: int = 3) -> int | None:
+        target = target_path.replace("\\", "/")
+        seeds = [path.replace("\\", "/") for path in seed_paths if path]
+        if not target or not seeds:
+            return None
+        if target in seeds:
+            return 0
+        frontier = seeds[:]
+        visited = set(seeds)
+        for hop in range(1, max_hops + 1):
+            next_frontier: list[str] = []
+            for path in frontier:
+                for neighbor in self.neighbors(path):
+                    if neighbor == target:
+                        return hop
+                    if neighbor not in visited:
+                        visited.add(neighbor)
+                        next_frontier.append(neighbor)
+            frontier = next_frontier
+            if not frontier:
+                break
+        return None
+
+    def file_rank_scores(
+        self,
+        seed_paths: list[str],
+        candidate_paths: list[str],
+        max_hops: int = 3,
+    ) -> dict[str, float]:
+        normalized_candidates = [path.replace("\\", "/") for path in candidate_paths if path]
+        if not normalized_candidates:
+            return {}
+        inbound: dict[str, int] = {}
+        for path in self.files:
+            for neighbor in self.neighbors(path):
+                inbound[neighbor] = inbound.get(neighbor, 0) + 1
+        scores: dict[str, float] = {}
+        for path in normalized_candidates:
+            distance = self.path_distance(seed_paths, path, max_hops=max_hops)
+            out_degree = len(self.neighbors(path))
+            in_degree = inbound.get(path, 0)
+            degree_bonus = min(0.25, 0.03 * out_degree + 0.02 * in_degree)
+            if distance is None:
+                scores[path] = round(degree_bonus, 4)
+            else:
+                proximity = max(0.0, 1.0 - 0.22 * distance)
+                if distance == 0:
+                    proximity += 0.15
+                scores[path] = round(proximity + degree_bonus, 4)
+        return scores
+
     def summary(self) -> dict[str, Any]:
         by_kind: dict[str, int] = {}
         for symbol in self.symbols:

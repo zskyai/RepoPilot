@@ -13,6 +13,7 @@ def main() -> None:
     parser.add_argument("--list", action="store_true")
     parser.add_argument("--approve", default="")
     parser.add_argument("--reject", default="")
+    parser.add_argument("--checkpoints", default="")
     parser.add_argument("--reason", default="")
     args = parser.parse_args()
 
@@ -21,7 +22,11 @@ def main() -> None:
         store.decide(args.approve, True, args.reason or "approved by operator")
     if args.reject:
         store.decide(args.reject, False, args.reason or "rejected by operator")
-    print(json.dumps({"pending": store.list_pending()}, ensure_ascii=False, indent=2))
+    payload = {"pending": store.list_pending()}
+    if args.checkpoints:
+        payload["checkpoints"] = store.list_checkpoints(args.checkpoints)
+        payload["latest_checkpoint"] = store.latest_checkpoint(args.checkpoints)
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":

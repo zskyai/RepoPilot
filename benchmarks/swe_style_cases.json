@@ -33,5 +33,66 @@
     "issue": "Find the GitHub PR and CI workflow implementation together with the approval gate and persistent trace outputs.",
     "test_command": "python -m pytest -q",
     "setup_commands": []
+  },
+  {
+    "instance_id": "repopilot_self_memory_store",
+    "repo": ".",
+    "issue": "Locate RepoPilot long-term memory storage, semantic recall flow, and saved memory identifiers.",
+    "test_command": "python -m pytest -q",
+    "setup_commands": []
+  },
+  {
+    "instance_id": "repopilot_self_trace_store",
+    "repo": ".",
+    "issue": "Find how graph traces are persisted, how checkpoints are stored, and how a resumed run is labeled.",
+    "test_command": "python -m pytest -q",
+    "setup_commands": []
+  },
+  {
+    "instance_id": "repopilot_self_dashboard",
+    "repo": ".",
+    "issue": "Locate the dashboard controls for approval gate, graph mode, memory, CI feedback, and saved run output.",
+    "test_command": "python -m pytest -q",
+    "setup_commands": []
+  },
+  {
+    "instance_id": "repopilot_self_cross_file_repair_context",
+    "repo": ".",
+    "issue": "Trace the cross-file repair-context replay path between `app/scenarios/repo_pilot_graph.py` and `app/scenarios/repo_pilot.py`: where verify builds repair context, how repair carries it forward, and how the base workflow consumes it in the next act run.",
+    "test_command": "python -m pytest -q",
+    "setup_commands": [],
+    "tags": ["cross_file", "repair_context", "graph"],
+    "expected_paths": [
+      "app/scenarios/repo_pilot_graph.py",
+      "app/scenarios/repo_pilot.py"
+    ],
+    "expected_repair_context": true,
+    "expected_multi_file": true
+  },
+  {
+    "instance_id": "repopilot_self_cross_file_patch_portfolio",
+    "repo": ".",
+    "issue": "Locate the cross-file coordination pipeline between `app/scenarios/repo_pilot.py` and `app/core/repair_loop.py`: where RepoPilot builds coordination bundles, scores patch portfolios, and prefers validated multi-file fixes.",
+    "test_command": "python -m pytest -q",
+    "setup_commands": [],
+    "tags": ["cross_file", "patch_portfolio", "repair_loop"],
+    "expected_paths": [
+      "app/scenarios/repo_pilot.py",
+      "app/core/repair_loop.py"
+    ],
+    "expected_multi_file": true
+  },
+  {
+    "instance_id": "repopilot_self_public_eval_reporting",
+    "repo": ".",
+    "issue": "Find the public-eval reporting flow across `app/eval/swe_bench_runner.py` and `run_swe_bench_style.py`: where SWE-style cases are executed, how public metrics are aggregated, and where markdown report output is written.",
+    "test_command": "python -m pytest -q",
+    "setup_commands": [],
+    "tags": ["public_eval", "cross_file", "benchmark_reporting"],
+    "expected_paths": [
+      "app/eval/swe_bench_runner.py",
+      "run_swe_bench_style.py"
+    ],
+    "expected_multi_file": true
   }
 ]

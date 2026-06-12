@@ -199,6 +199,7 @@ class RepoPilotGraphWorkflow:
                 comment_body=payload.get("comment_body", ""),
                 repair_context=payload.get("repair_context") or None,
                 original_issue=payload.get("original_issue") or payload["issue"],
+                thread_id=payload.get("graph_thread_id", ""),
             )
         return {"payload": payload}
 

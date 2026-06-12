@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +34,26 @@ class MemoryStore:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS thread_profiles (
+                    thread_id TEXT PRIMARY KEY,
+                    updated_at TEXT NOT NULL,
+                    repo_path TEXT NOT NULL,
+                    summary TEXT NOT NULL,
+                    profile_json TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS user_preferences (
+                    repo_path TEXT PRIMARY KEY,
+                    updated_at TEXT NOT NULL,
+                    preference_json TEXT NOT NULL
+                )
+                """
+            )
 
     def save_from_payload(self, payload: dict[str, Any]) -> int:
         issue = payload.get("issue") or payload.get("query") or ""
@@ -60,6 +81,84 @@ class MemoryStore:
             )
             return int(cur.lastrowid)
 
+    def save_thread_profile(
+        self,
+        thread_id: str,
+        repo_path: str,
+        summary: str,
+        profile: dict[str, Any],
+    ) -> None:
+        if not thread_id:
+            return
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO thread_profiles (thread_id, updated_at, repo_path, summary, profile_json)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    thread_id,
+                    utc_now(),
+                    repo_path,
+                    summary[:500],
+                    json.dumps(profile, ensure_ascii=False),
+                ),
+            )
+
+    def load_thread_profile(self, thread_id: str) -> dict[str, Any]:
+        if not thread_id:
+            return {}
+        with sqlite3.connect(self.db_path) as conn:
+            row = conn.execute(
+                """
+                SELECT thread_id, updated_at, repo_path, summary, profile_json
+                FROM thread_profiles
+                WHERE thread_id = ?
+                """,
+                (thread_id,),
+            ).fetchone()
+        if not row:
+            return {}
+        return {
+            "thread_id": row[0],
+            "updated_at": row[1],
+            "repo_path": row[2],
+            "summary": row[3],
+            "profile": json.loads(row[4]),
+        }
+
+    def save_user_preferences(self, repo_path: str, preferences: dict[str, Any]) -> None:
+        if not repo_path:
+            return
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO user_preferences (repo_path, updated_at, preference_json)
+                VALUES (?, ?, ?)
+                """,
+                (
+                    repo_path,
+                    utc_now(),
+                    json.dumps(preferences, ensure_ascii=False),
+                ),
+            )
+
+    def load_user_preferences(self, repo_path: str) -> dict[str, Any]:
+        if not repo_path:
+            return {}
+        with sqlite3.connect(self.db_path) as conn:
+            row = conn.execute(
+                """
+                SELECT preference_json
+                FROM user_preferences
+                WHERE repo_path = ?
+                """,
+                (repo_path,),
+            ).fetchone()
+        if not row:
+            return {}
+        return json.loads(row[0])
+
     def search(self, issue: str, repo_path: str = "", top_k: int = 3) -> list[dict[str, Any]]:
         vectors, provider = resilient_embed_texts(self.embedding_client, [issue])
         query_vector = vectors[0]
@@ -80,6 +179,11 @@ class MemoryStore:
             score = cosine_similarity(query_vector, memory_vector)
             if repo_path and row[2] and Path(repo_path).resolve().as_posix() == Path(row[2]).resolve().as_posix():
                 score += 0.05
+            score += self._recency_bonus(row[1])
+            if row[5] == "passed":
+                score += 0.03
+            payload = json.loads(row[8])
+            score += self._repair_learning_bonus(payload)
             scored.append(
                 (
                     score,
@@ -93,12 +197,32 @@ class MemoryStore:
                         "embedding_provider": row[6],
                         "query_provider": provider,
                         "score": round(score, 4),
-                        "payload": json.loads(row[8]),
+                        "payload": payload,
                     },
                 )
             )
         scored.sort(key=lambda item: item[0], reverse=True)
         return [item for score, item in scored[:top_k] if score > 0.05]
+
+    def _recency_bonus(self, created_at: str) -> float:
+        try:
+            stamp = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+        except Exception:
+            return 0.0
+        age_days = max(0.0, (datetime.now(timezone.utc) - stamp).total_seconds() / 86400.0)
+        if age_days <= 3:
+            return 0.03
+        if age_days <= 14:
+            return 0.015
+        return 0.0
+
+    def _repair_learning_bonus(self, payload: dict[str, Any]) -> float:
+        journal = payload.get("repair_journal", []) or []
+        if not journal:
+            return 0.0
+        passed_rounds = sum(1 for item in journal if item.get("passed"))
+        focused_rounds = sum(1 for item in journal if len(item.get("target_files", []) or []) <= 2)
+        return min(0.05, passed_rounds * 0.01 + focused_rounds * 0.005)
 
     def _memory_text(self, payload: dict[str, Any], summary: str) -> str:
         analysis = payload.get("analysis", {})
@@ -140,10 +264,14 @@ class MemoryStore:
             "repo_path": payload.get("repo_path"),
             "issue": payload.get("issue"),
             "evaluation": payload.get("evaluation", {}),
+            "user_profile": analysis.get("user_profile", {}),
             "root_cause_hypothesis": analysis.get("root_cause_hypothesis"),
             "suspected_files": analysis.get("suspected_files", []),
             "change_plan": analysis.get("change_plan", []),
             "patch_suggestions": analysis.get("patch_suggestions", [])[:3],
             "patch_checks": analysis.get("patch_checks", [])[:5],
+            "selected_patch": analysis.get("selected_patch", {}),
+            "coordination_plan": analysis.get("coordination_plan", [])[:6],
+            "repair_journal": analysis.get("repair_journal", [])[:8],
             "github": (payload.get("pr_plan") or {}).get("github", {}),
         }

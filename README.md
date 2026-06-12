@@ -49,6 +49,7 @@ The current implementation includes:
 - Approval gates in `.repopilot/approvals.sqlite3`
 - SWE-bench style runner in `run_swe_bench_style.py`
 - Benchmark runner with stable multi-case evaluation
+- Public-eval JSON and markdown report generation
 - FastAPI dashboard for interactive runs
 - Execution-unit-driven multi-candidate patch generation
 - Coordinated patch portfolio selection with closed-loop preference
@@ -104,6 +105,19 @@ The result is a stronger patch-quality profile:
 - self-repo documentation and operator-facing cases now reach `0.954`
 - open-source documentation cases now reach `0.907`
 - full 8-case benchmark average is `0.936`
+
+Latest expanded public-eval snapshot:
+
+- `case_count = 11`
+- `strict_pass_at_1 = 0.0`
+- `env_adjusted_pass_at_1 = 1.0`
+- `average_overall = 0.954`
+- `average_elapsed_seconds = 27.76`
+- `cross_file_case_count = 3`
+- `cross_file_pass_rate = 1.0`
+- `average_expected_path_recall = 0.5`
+- `repair_context_usage_rate = 1.0`
+- `environment_limited_case_count = 11`
 
 ## Quick Start
 
@@ -243,20 +257,38 @@ No-graph vs graph-enhanced retrieval comparison:
 SWE-bench style evaluation:
 
 ```powershell
-.\.venv\Scripts\python.exe run_swe_bench_style.py --cases benchmarks\swe_style_cases.json --work-dir .repopilot\swe_runs --max-cases 8
+.\.venv\Scripts\python.exe run_swe_bench_style.py --cases benchmarks\swe_style_cases.json --work-dir .repopilot\swe_runs --max-cases 11 --write-json .repopilot\reports\public_eval_latest.json --write-markdown .repopilot\reports\public_eval_latest.md
 ```
 
 The runner reports:
 
 - `pass_at_1`
+- `adjusted_pass_at_1`
 - per-case elapsed time
 - external test status
+- cross-file path recall and repair-context usage
 - `saved_run_id`
 - `graph_run_id`
 - `trace_db_path`
 - `markdown_table`
+- `public_markdown`
 
-Current local SWE-style suite contains 8 self-hosted cases for:
+Official/public SWE-bench mode:
+
+```powershell
+.\.venv\Scripts\python.exe run_swe_bench_style.py --cases benchmarks\swe_style_cases.json --dataset-path path\to\swe_bench_verified_sample.jsonl --dataset-name princeton-nlp/SWE-bench_Verified --dataset-split test --instance-id django__django-16527 --write-preds .repopilot\reports\all_preds.jsonl --write-json .repopilot\reports\official_eval_summary.json
+```
+
+In this mode RepoPilot:
+
+- loads official SWE-bench-style instances from a local JSON/JSONL/parquet export or HuggingFace `datasets`
+- runs the agent on each official issue at its `base_commit`
+- writes harness-compatible prediction rows to `all_preds.jsonl`
+- leaves final strict scoring to the official SWE-bench harness
+
+This is the benchmark path to use when you want a publicly recognizable coding-agent evaluation instead of the smaller self-hosted suite.
+
+Current local SWE-style suite contains 11 self-hosted cases for:
 
 - retrieval and graph localization
 - approval gate behavior
@@ -266,6 +298,9 @@ Current local SWE-style suite contains 8 self-hosted cases for:
 - memory store discovery
 - persistent trace and checkpoint discovery
 - dashboard and operator controls
+- repair-context replay across `repo_pilot_graph.py` and `repo_pilot.py`
+- cross-file patch-portfolio coordination across `repo_pilot.py` and `repair_loop.py`
+- public-eval reporting across `swe_bench_runner.py` and `run_swe_bench_style.py`
 
 To inspect persisted checkpoints for a graph run:
 

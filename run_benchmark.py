@@ -22,11 +22,87 @@ def main() -> None:
         action="store_true",
         help="Run both rule-based baseline and requested mode, then report deltas.",
     )
+    parser.add_argument(
+        "--compare-multi-candidate",
+        action="store_true",
+        help="Compare single-candidate mode against multi-candidate patch portfolio mode.",
+    )
+    parser.add_argument(
+        "--compare-graph-ablation",
+        action="store_true",
+        help="Compare no-graph rerank mode against graph-enhanced retrieval and impact prediction mode.",
+    )
     args = parser.parse_args()
 
     root = Path(__file__).resolve().parent
     cases = json.loads((root / args.cases).read_text(encoding="utf-8"))
-    if args.compare_baseline:
+    if args.compare_graph_ablation:
+        no_graph = run_suite(
+            root=root,
+            cases=cases,
+            use_llm=args.use_llm,
+            require_llm=args.require_llm,
+            run_tests=args.run_tests,
+            apply_sandbox=args.apply_sandbox,
+            save_run=False,
+            label="no_graph",
+            enable_multi_candidate=True,
+            enable_graph_rerank=False,
+        )
+        graph_enhanced = run_suite(
+            root=root,
+            cases=cases,
+            use_llm=args.use_llm,
+            require_llm=args.require_llm,
+            run_tests=args.run_tests,
+            apply_sandbox=args.apply_sandbox,
+            save_run=args.save_run,
+            label="graph_enhanced",
+            enable_multi_candidate=True,
+            enable_graph_rerank=True,
+        )
+        summary = {
+            "no_graph": no_graph,
+            "graph_enhanced": graph_enhanced,
+            "delta": {
+                "pass_rate": round(graph_enhanced["pass_rate"] - no_graph["pass_rate"], 3),
+                "average_overall": round(graph_enhanced["average_overall"] - no_graph["average_overall"], 3),
+            },
+        }
+    elif args.compare_multi_candidate:
+        single_candidate = run_suite(
+            root=root,
+            cases=cases,
+            use_llm=args.use_llm,
+            require_llm=args.require_llm,
+            run_tests=args.run_tests,
+            apply_sandbox=args.apply_sandbox,
+            save_run=False,
+            label="single_candidate",
+            enable_multi_candidate=False,
+            enable_graph_rerank=True,
+        )
+        multi_candidate = run_suite(
+            root=root,
+            cases=cases,
+            use_llm=args.use_llm,
+            require_llm=args.require_llm,
+            run_tests=args.run_tests,
+            apply_sandbox=args.apply_sandbox,
+            save_run=args.save_run,
+            label="multi_candidate",
+            enable_multi_candidate=True,
+            enable_graph_rerank=True,
+        )
+        summary = {
+            "single_candidate": single_candidate,
+            "multi_candidate": multi_candidate,
+            "delta": {
+                "pass_rate": round(multi_candidate["pass_rate"] - single_candidate["pass_rate"], 3),
+                "average_overall": round(multi_candidate["average_overall"] - single_candidate["average_overall"], 3),
+            },
+        }
+    elif args.compare_baseline:
         baseline = run_suite(
             root=root,
             cases=cases,
@@ -36,6 +112,8 @@ def main() -> None:
             apply_sandbox=args.apply_sandbox,
             save_run=False,
             label="baseline",
+            enable_multi_candidate=True,
+            enable_graph_rerank=True,
         )
         candidate = run_suite(
             root=root,
@@ -46,6 +124,8 @@ def main() -> None:
             apply_sandbox=args.apply_sandbox,
             save_run=args.save_run,
             label="candidate",
+            enable_multi_candidate=True,
+            enable_graph_rerank=True,
         )
         summary = {
             "baseline": baseline,
@@ -65,6 +145,8 @@ def main() -> None:
             apply_sandbox=args.apply_sandbox,
             save_run=args.save_run,
             label="suite",
+            enable_multi_candidate=True,
+            enable_graph_rerank=True,
         )
     print(json.dumps(summary, ensure_ascii=False, indent=2))
 
@@ -79,8 +161,15 @@ def run_suite(
     apply_sandbox: bool,
     save_run: bool,
     label: str,
+    enable_multi_candidate: bool,
+    enable_graph_rerank: bool,
 ) -> dict[str, object]:
-    workflow = RepoPilotGraphWorkflow(use_llm=use_llm, require_llm=require_llm)
+    workflow = RepoPilotGraphWorkflow(
+        use_llm=use_llm,
+        require_llm=require_llm,
+        enable_multi_candidate=enable_multi_candidate,
+        enable_graph_rerank=enable_graph_rerank,
+    )
     results = []
     for idx, case in enumerate(cases, start=1):
         started_at = time.time()
