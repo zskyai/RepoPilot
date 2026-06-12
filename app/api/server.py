@@ -62,7 +62,7 @@ if FastAPI:
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>RepoPilot Dashboard</title>
+  <title>RepoPilot Operator Console</title>
   <style>
     body { font-family: Arial, sans-serif; margin: 24px; background: #f6f7fb; color: #111; }
     .wrap { max-width: 1100px; margin: 0 auto; }
@@ -77,12 +77,12 @@ if FastAPI:
 </head>
 <body>
   <div class="wrap">
-    <h1>RepoPilot Dashboard</h1>
+    <h1>RepoPilot Operator Console</h1>
     <div class="panel">
       <label>Repository Path</label>
       <input id="repo" value="." />
       <label>Issue</label>
-      <textarea id="issue">API 返回 JSON schema 字段不稳定，需要定位接口和模型定义</textarea>
+      <textarea id="issue">API returns an unstable JSON schema; locate the endpoint and stabilize the contract.</textarea>
       <div class="checks">
         <label><input type="checkbox" id="run_tests" checked /> run tests</label>
         <label><input type="checkbox" id="use_llm" checked /> use llm</label>
@@ -107,18 +107,18 @@ if FastAPI:
       <button onclick="runRepoPilot()">Run</button>
     </div>
     <div class="grid" style="margin-top:16px;">
-      <div class="panel"><h3>Summary</h3><pre id="summary"></pre></div>
-      <div class="panel"><h3>Trace</h3><pre id="trace"></pre></div>
+      <div class="panel"><h3>Run Summary</h3><pre id="summary"></pre></div>
+      <div class="panel"><h3>Execution Trace</h3><pre id="trace"></pre></div>
     </div>
     <div class="grid" style="margin-top:16px;">
       <div class="panel"><h3>Selected Patch</h3><pre id="selected_patch"></pre></div>
       <div class="panel"><h3>Failure Signals</h3><pre id="failure_signals"></pre></div>
     </div>
     <div class="grid" style="margin-top:16px;">
-      <div class="panel"><h3>Compressed Context</h3><pre id="compressed_context"></pre></div>
+      <div class="panel"><h3>Compressed Context Packet</h3><pre id="compressed_context"></pre></div>
       <div class="panel"><h3>Decision Tree</h3><pre id="decision_tree"></pre></div>
     </div>
-    <div class="panel" style="margin-top:16px;"><h3>Full JSON</h3><pre id="json"></pre></div>
+    <div class="panel" style="margin-top:16px;"><h3>Full Run Payload</h3><pre id="json"></pre></div>
   </div>
   <script>
     async function runRepoPilot() {

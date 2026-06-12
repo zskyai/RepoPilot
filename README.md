@@ -1,123 +1,148 @@
 # RepoPilot
 
-RepoPilot is a production-shaped multi-agent coding agent for real repositories.
+RepoPilot is a production-shaped coding agent for real repositories.
 
-It takes an issue, retrieves the relevant code, reasons about the root cause, proposes and validates patches, applies them in an isolated sandbox, runs tests, collects GitHub CI feedback, and stores durable repair memory for future runs.
+It is built for the part that matters in practice: take a repository issue, localize the relevant code, generate and validate patch candidates, challenge weak fixes, run sandbox verification, collect durable memory, and expose the reasoning path in a way an engineer can inspect.
 
-This project is intentionally not a toy chatbot. The useful unit is a repository workflow:
+This is not a toy prompt wrapper. RepoPilot is meant to look and behave like a serious software engineering agent.
 
-1. index code with lexical, structural, and embedding retrieval
-2. localize files, symbols, and likely call paths
-3. use a real OpenAI-compatible LLM as the reasoning engine
-4. generate structured root-cause analysis and patch plans
-5. validate unified diffs with `git apply --check`
-6. apply candidate patches in a sandbox copy
-7. run `pytest` / smoke checks
-8. loop on repair feedback when validation fails
-9. create or update GitHub PRs
-10. poll CI checks and write PR comments
-11. save long-term repair memory in SQLite
+## What RepoPilot Does
 
-## Why This Project Matters
+RepoPilot turns a repository issue into an end-to-end repair workflow:
 
-RepoPilot is designed to look and behave like a serious software engineering agent instead of a prompt wrapper.
+1. retrieve relevant code with lexical, embedding, symbol, call, import, and graph signals
+2. localize likely files, functions, and propagation paths
+3. generate multiple patch candidates
+4. validate unified diffs with `git apply --check`
+5. run candidate patches in isolated sandboxes
+6. score and rank candidates with graph, policy, and adversarial signals
+7. replay repair context across rounds
+8. persist repair memory, user preferences, and thread-level context
+9. expose compressed context and a decision tree for operator inspection
 
-The current implementation includes:
+## Why It Is Different
 
-- Tree-sitter code knowledge graph
-- Qdrant dense + sparse hybrid retrieval with RRF fusion
-- GraphRAG-style retrieval with graph propagation rerank
-- LangGraph-style execution with persistent traces
-- approval gates before worktree or GitHub mutation
-- structured repair signals from `pytest`, `git apply`, and GitHub CI
-- SWE-bench style evaluation runner
+Most repo agents stop at "LLM + retrieval + diff text."
+
+RepoPilot pushes deeper on the parts that decide whether a coding agent is actually useful:
+
+- semantic AST rewrite planning for Python targets
+- graph-aware file ranking and patch selection
+- parallel patch tournament execution in sandbox copies
+- adversarial review that challenges weak or superficial patches
+- counterexample-driven regeneration when the first patch is not robust
+- persistent repair memory plus repo-level preference learning
+- thread-aware memory hooks for multi-round workflows
+- compressed context packets for large-repo and long-run stability
+- decision-tree output for explainability
+
+## Core Architecture
+
+### Retrieval
+
+- Tree-sitter code graph for Python, JavaScript, TypeScript, and TSX
+- dense + sparse hybrid retrieval with rerank
+- symbol / call / import / graph propagation signals
+- impacted-file prediction from local code graph structure
+
+### Planning
+
+- structured root-cause hypothesis
+- implementation blueprint
+- execution-unit decomposition
+- acceptance-bundle generation
+
+### Patch Generation
+
+- rule-based and LLM-assisted patch generation
+- AST-aware function-scoped patch candidates
+- semantic AST rewrite-plan candidates
+- execution-unit-driven multi-candidate patch generation
+
+### Patch Selection
+
+- patch portfolio ranking
+- graph-priority bonus
+- policy priors learned from past repairs
+- adversarial penalty for weak patch archetypes
+- dynamic candidate budget for sandbox evaluation
+
+### Repair Loop
+
+- failure parsing from `pytest`, `git apply`, and CI feedback
+- repair-context replay across rounds
+- counterexample-driven patch regeneration
+- sandbox-first validation before worktree mutation
+
+### Memory
+
+- long-term repair memory in `.repopilot/memory.sqlite3`
+- repo-level preference persistence
+- thread-level profile persistence
+- user-style inference from issue text and successful repair history
+
+### Explainability
+
+- compressed context packet
+- decision tree with Mermaid-ready structure
+- persistent trace and checkpoint artifacts
 
 ## Current Capabilities
 
-- Multi-agent workflow with a LangGraph-compatible state graph
-- Real LLM integration through DashScope/Qwen or any OpenAI-compatible endpoint
-- Tree-sitter code knowledge graph for Python, JavaScript, TypeScript, and TSX
-- Qdrant-backed hybrid retrieval: lexical, dense vector, symbol/call/import, and rerank scoring
-- Qdrant dense + sparse hybrid retrieval with RRF fusion
-- Impacted-file prediction from code graph subgraphs
-- Sandbox patch apply and test execution
-- Worktree patch apply with guardrails
-- GitHub PR, CI, and PR comment integration
-- CI feedback collection for repair context
-- Long-term repository memory in `.repopilot/memory.sqlite3`
-- Persistent graph traces in `.repopilot/traces.sqlite3`
-- Approval gates in `.repopilot/approvals.sqlite3`
-- SWE-bench style runner in `run_swe_bench_style.py`
-- Benchmark runner with stable multi-case evaluation
-- Public-eval JSON and markdown report generation
-- FastAPI dashboard for interactive runs
-- Execution-unit-driven multi-candidate patch generation
-- Coordinated patch portfolio selection with closed-loop preference
+- multi-agent repo diagnosis and repair workflow
+- real OpenAI-compatible LLM integration
+- graph-based retrieval and rerank
+- semantic AST rewrite candidate generation
+- parallel patch sandbox execution
+- adversarial patch review
+- counterexample-driven regeneration
+- worktree patch apply with guardrails
+- GitHub PR / CI / comment integration
+- interactive CLI mode with guided prompts
+- FastAPI dashboard for operator workflows
+- SWE-bench-style evaluation runner
+- public-eval JSON / Markdown export
 
-## Validated Results
+## Validated State
 
-Recent local validation on this project:
+Recent verified local state for this repository:
 
-- `pytest`: passed
-- Tree-sitter code graph: parsed 36 repository files
-- code graph extraction: 233 symbols, 1502 relations
-- hybrid retrieval backend: `qdrant_local_dense_sparse_rrf`
-- approval gate smoke: passed
-- SWE-style runner smoke: `pass_at_1 = 1.0`
-- GitHub CI on PR branch: passed
+- `22 passed` test suite
+- interactive CLI available through `run_repo_pilot.py --interactive`
+- compressed context and decision tree emitted in real runs
+- repo-level preference persistence loaded in real smoke runs
+- semantic AST rewrite candidates integrated into the patch pipeline
+- graph-aware and policy-aware patch selection active
 
-## Public Benchmark Snapshot
+Representative real smoke signals observed during recent runs:
 
-Latest stable self-hosted SWE-style snapshot:
+- real repo smoke overall around `0.838`
+- semantic-AST-oriented smoke overall around `0.863`
+- thread memory storage verified
+- repo preference loading verified
 
-- `case_count = 8`
-- `pass_rate = 1.0`
-- `average_overall = 0.936`
-- `average_elapsed_seconds = 21.0`
-- coverage includes retrieval, approval gates, repair signals, memory, trace store, GitHub workflow discovery, and dashboard operator paths
+These are project-internal validation signals, not external leaderboard claims.
 
-Latest representative real-repo case:
+## Public Benchmark Position
 
-- repository: `python-slugify`
-- task: contributor-facing README improvement and test-entry guidance
-- overall score: `0.907`
-- `patch_apply_check = 1.0`
-- localized files: `README.md`, `test.py`
+RepoPilot supports two benchmark layers:
 
-See:
+### 1. Stable local SWE-style suite
 
-- `docs/benchmark.md`
-- `docs/case_studies.md`
+Used to validate repeatable end-to-end agent behavior on controlled tasks:
 
-## Recent Validated Upgrades
+- retrieval
+- graph localization
+- repair context replay
+- memory
+- dashboard / operator path
+- benchmark reporting
 
-Recent work focused on making documentation-oriented patching behave more like a real coding agent instead of a generic LLM wrapper.
+### 2. Official/public SWE-bench pathway
 
-- improved open-source README patch quality on `python-slugify`
-- improved self-repo README patch quality for Quick Start, benchmark output explanation, and SQLite run-history guidance
-- added whitespace-tolerant `git apply` fallback for mixed-EOL repositories
-- added automatic unified-diff hunk recounting so valid patches are less likely to fail on line-count drift
-- added graph-level repair context replay so later rounds keep structured failure signals, target files, and patch-ranking hints
-- kept benchmark scoring tied to real patch checks, sandbox apply, and executable test signals
+RepoPilot can load official/public instances from local `json`, `jsonl`, or `parquet`, run the agent, and export harness-compatible `all_preds.jsonl`.
 
-The result is a stronger patch-quality profile:
-
-- self-repo documentation and operator-facing cases now reach `0.954`
-- open-source documentation cases now reach `0.907`
-- full 8-case benchmark average is `0.936`
-
-Latest expanded public-eval snapshot:
-
-- `case_count = 11`
-- `strict_pass_at_1 = 0.0`
-- `env_adjusted_pass_at_1 = 1.0`
-- `average_overall = 0.954`
-- `average_elapsed_seconds = 27.76`
-- `cross_file_case_count = 3`
-- `cross_file_pass_rate = 1.0`
-- `average_expected_path_recall = 0.5`
-- `repair_context_usage_rate = 1.0`
-- `environment_limited_case_count = 11`
+Important: local approximate runs are clearly labeled as approximate when the repository snapshot is not the exact official base commit.
 
 ## Quick Start
 
@@ -132,7 +157,7 @@ python -m venv .venv
 
 Copy `.env.example` to `.env`.
 
-For DashScope/Qwen:
+DashScope / Qwen example:
 
 ```env
 DASHSCOPE_API_KEY=your-key
@@ -140,7 +165,7 @@ QWEN_MODEL=qwen-plus
 QWEN_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 ```
 
-Optional embedding configuration:
+Embedding example:
 
 ```env
 EMBEDDING_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
@@ -148,7 +173,7 @@ EMBEDDING_API_KEY=your-key
 EMBEDDING_MODEL=text-embedding-v4
 ```
 
-Generic OpenAI-compatible providers are also supported:
+Generic OpenAI-compatible example:
 
 ```env
 LLM_BASE_URL=https://api.example.com/v1
@@ -156,65 +181,47 @@ LLM_API_KEY=your-key
 LLM_MODEL=gpt-4o-mini
 ```
 
-For GitHub integration:
+GitHub integration:
 
 ```env
 GITHUB_TOKEN=github_pat_or_classic_token
 ```
 
-The token needs repository access for PR creation, reading checks, and writing comments.
+## Run Modes
 
-### 3. Run The Agent
+### Interactive CLI
 
-Use the graph workflow for the production path:
-
-```powershell
-.\.venv\Scripts\python.exe run_repo_pilot.py --repo . --issue "API returns an unstable JSON schema; locate the endpoint and model definitions." --run-tests --apply-sandbox --save-run --use-llm --require-llm --graph
-```
-
-To allow a validated patch to be applied back to the working tree:
+For guided usage without memorizing flags:
 
 ```powershell
-.\.venv\Scripts\python.exe run_repo_pilot.py --repo . --issue "Fix a failing package import when the API server starts." --run-tests --apply-sandbox --apply-worktree --save-run --use-llm --require-llm --graph
+.\.venv\Scripts\python.exe run_repo_pilot.py --interactive
 ```
 
-To create a PR, poll CI, and comment back to GitHub:
+### Graph Workflow
+
+Main production path:
 
 ```powershell
-.\.venv\Scripts\python.exe run_repo_pilot.py --repo . --issue "GitHub integration smoke" --run-tests --apply-sandbox --apply-worktree --create-pr --poll-ci --comment-body "RepoPilot validation passed." --save-run --use-llm --require-llm --graph
+.\.venv\Scripts\python.exe run_repo_pilot.py --repo . --issue "API returns an unstable JSON schema; locate the endpoint and stabilize the contract." --run-tests --apply-sandbox --save-run --use-llm --graph
 ```
 
-To inspect or approve mutation gates created by graph runs:
+### Worktree Apply
+
+Apply a validated patch back to the repository:
 
 ```powershell
-.\.venv\Scripts\python.exe run_approval.py --repo . --list
-.\.venv\Scripts\python.exe run_approval.py --repo . --approve "<gate_id>" --reason "approved after diff review"
+.\.venv\Scripts\python.exe run_repo_pilot.py --repo . --issue "Fix a failing package import at startup." --run-tests --apply-sandbox --apply-worktree --save-run --use-llm --graph
 ```
 
-## Long-Term Memory
+### GitHub Workflow
 
-RepoPilot saves compact repair memories in:
-
-```text
-.repopilot/memory.sqlite3
-```
-
-Each memory stores the issue, root-cause summary, suspected files, patch evidence, evaluation result, GitHub/CI feedback, and an embedding for semantic recall.
-
-Memory is enabled by default:
+Create a PR and inspect CI:
 
 ```powershell
-.\.venv\Scripts\python.exe run_repo_pilot.py --repo . --issue "..." --use-llm --graph
+.\.venv\Scripts\python.exe run_repo_pilot.py --repo . --issue "GitHub integration smoke" --run-tests --apply-sandbox --apply-worktree --create-pr --poll-ci --comment-body "RepoPilot validation passed." --save-run --use-llm --graph
 ```
 
-Disable recall or saving when needed:
-
-```powershell
-.\.venv\Scripts\python.exe run_repo_pilot.py --repo . --issue "..." --no-memory
-.\.venv\Scripts\python.exe run_repo_pilot.py --repo . --issue "..." --no-save-memory
-```
-
-## API / Dashboard
+## Dashboard
 
 Start the local dashboard:
 
@@ -225,136 +232,76 @@ Start the local dashboard:
 Open:
 
 ```text
-http://127.0.0.1:8000
+http://127.0.0.1:8000/repo-pilot/ui
 ```
 
-The dashboard exposes run options for LLM, sandbox apply, tests, GitHub PR/CI, and memory.
+The dashboard exposes:
 
-## Benchmark
+- run configuration
+- selected patch
+- failure signals
+- compressed context
+- decision tree
+- full JSON payload
+
+## Memory and Persistence
+
+RepoPilot persists:
+
+- repair memories
+- selected patch evidence
+- repair journals
+- repo-level preference profiles
+- thread-level profiles
+
+Primary local stores:
+
+```text
+.repopilot/memory.sqlite3
+.repopilot/traces.sqlite3
+.repopilot/approvals.sqlite3
+```
+
+## Benchmark Commands
+
+Local benchmark:
 
 ```powershell
-.\.venv\Scripts\python.exe run_benchmark.py --use-llm --require-llm --run-tests --apply-sandbox --save-run
+.\.venv\Scripts\python.exe run_benchmark.py --use-llm --run-tests --apply-sandbox --save-run
 ```
 
-Baseline comparison:
-
-```powershell
-.\.venv\Scripts\python.exe run_benchmark.py --use-llm --require-llm --run-tests --apply-sandbox --compare-baseline
-```
-
-Single-candidate vs multi-candidate patch generation comparison:
-
-```powershell
-.\.venv\Scripts\python.exe run_benchmark.py --run-tests --apply-sandbox --compare-multi-candidate
-```
-
-No-graph vs graph-enhanced retrieval comparison:
-
-```powershell
-.\.venv\Scripts\python.exe run_benchmark.py --run-tests --apply-sandbox --compare-graph-ablation
-```
-
-SWE-bench style evaluation:
+SWE-style evaluation:
 
 ```powershell
 .\.venv\Scripts\python.exe run_swe_bench_style.py --cases benchmarks\swe_style_cases.json --work-dir .repopilot\swe_runs --max-cases 11 --write-json .repopilot\reports\public_eval_latest.json --write-markdown .repopilot\reports\public_eval_latest.md
 ```
 
-The runner reports:
-
-- `pass_at_1`
-- `adjusted_pass_at_1`
-- per-case elapsed time
-- external test status
-- cross-file path recall and repair-context usage
-- `saved_run_id`
-- `graph_run_id`
-- `trace_db_path`
-- `markdown_table`
-- `public_markdown`
-
-Official/public SWE-bench mode:
+Official/public instance pathway:
 
 ```powershell
-.\.venv\Scripts\python.exe run_swe_bench_style.py --cases benchmarks\swe_style_cases.json --dataset-path path\to\swe_bench_verified_sample.jsonl --dataset-name princeton-nlp/SWE-bench_Verified --dataset-split test --instance-id django__django-16527 --write-preds .repopilot\reports\all_preds.jsonl --write-json .repopilot\reports\official_eval_summary.json
+.\.venv\Scripts\python.exe run_swe_bench_style.py --dataset-path path\to\official_swe_bench.jsonl --dataset-name princeton-nlp/SWE-bench_Verified --dataset-split test --instance-id django__django-16527 --write-preds .repopilot\reports\all_preds.jsonl --write-json .repopilot\reports\official_eval_summary.json
 ```
 
-In this mode RepoPilot:
+## Current Limits
 
-- loads official SWE-bench-style instances from a local JSON/JSONL/parquet export or HuggingFace `datasets`
-- runs the agent on each official issue at its `base_commit`
-- writes harness-compatible prediction rows to `all_preds.jsonl`
-- leaves final strict scoring to the official SWE-bench harness
+RepoPilot is already a strong engineering agent prototype, but it is still short of the best frontier coding agents in a few places:
 
-This is the benchmark path to use when you want a publicly recognizable coding-agent evaluation instead of the smaller self-hosted suite.
+- semantic AST rewrite is still candidate-oriented, not yet a full executable rewrite operator
+- thread memory exists and persists, but long multi-session planning can still go deeper
+- patch synthesis quality is stronger than before, but still not at the level of the best closed commercial agents
+- official SWE-bench claims still depend on exact base-commit reproduction
 
-Current local SWE-style suite contains 11 self-hosted cases for:
+These are active design targets, not hidden weaknesses.
 
-- retrieval and graph localization
-- approval gate behavior
-- repair signal parsing
-- SWE-style runner behavior
-- GitHub workflow discovery
-- memory store discovery
-- persistent trace and checkpoint discovery
-- dashboard and operator controls
-- repair-context replay across `repo_pilot_graph.py` and `repo_pilot.py`
-- cross-file patch-portfolio coordination across `repo_pilot.py` and `repair_loop.py`
-- public-eval reporting across `swe_bench_runner.py` and `run_swe_bench_style.py`
+## Repository Goals
 
-To inspect persisted checkpoints for a graph run:
+RepoPilot is being developed as:
 
-```powershell
-.\.venv\Scripts\python.exe run_approval.py --repo . --checkpoints "<graph_run_id>"
-```
+- a serious GitHub-visible coding-agent project
+- a strong interview project for AI agent / coding-agent roles
+- a testbed for graph retrieval, semantic patching, and continual repair learning
 
-For a concise public-facing summary of the strongest recent runs, see `docs/case_studies.md`.
+## Related Docs
 
-## Architecture
+- [docs/benchmark.md](docs/benchmark.md)
 
-```mermaid
-flowchart LR
-    A["Issue"] --> B["Hybrid Retrieval"]
-    M["Tree-sitter Code Graph"] --> B
-    Q["Qdrant Vector Store"] --> B
-    B --> C["Root Cause Agent"]
-    C --> D["Patch Planner"]
-    D --> E["Patch Agent"]
-    E --> F["git apply --check"]
-    F --> G["Sandbox Apply"]
-    G --> H["Tests / Smoke"]
-    H --> I["Repair Loop"]
-    I --> E
-    H --> J["Judge / PR Readiness"]
-    J --> K["GitHub PR / CI / Comments"]
-    J --> L["Long-Term Memory"]
-    L --> C
-    J --> T["Persistent Trace Store"]
-    J --> U["Approval Gates"]
-```
-
-See:
-
-- `docs/architecture.md`
-- `docs/benchmark.md`
-- `docs/case_studies.md`
-- `docs/github_integration.md`
-- `docs/memory.md`
-
-## What Makes It Different From Direct LLM Calls
-
-A direct LLM call answers from prompt context only. RepoPilot adds tool-grounded execution:
-
-- repository indexing and retrieval before generation
-- structured multi-agent roles instead of one free-form prompt
-- code graph and hybrid retrieval instead of plain chunk similarity
-- patch validation with Git tooling
-- isolated sandbox apply
-- real test execution
-- CI feedback recovery
-- durable memory across runs
-- approval gates before destructive actions
-- persistent traces and checkpoints
-- PR-ready evidence and comments
-
-That means the agent can be evaluated by code facts, not only by fluent explanations.
