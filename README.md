@@ -282,6 +282,18 @@ Official/public instance pathway:
 .\.venv\Scripts\python.exe run_swe_bench_style.py --dataset-path path\to\official_swe_bench.jsonl --dataset-name princeton-nlp/SWE-bench_Verified --dataset-split test --instance-id django__django-16527 --write-preds .repopilot\reports\all_preds.jsonl --write-json .repopilot\reports\official_eval_summary.json
 ```
 
+Official dataset download/export example:
+
+```powershell
+.\.venv\Scripts\python.exe -c "from datasets import load_dataset; import json, pathlib; ds=load_dataset('princeton-nlp/SWE-bench_Verified', split='test'); target=pathlib.Path('.repopilot/official_datasets/swe_bench_verified_test_500.jsonl'); target.parent.mkdir(parents=True, exist_ok=True); f=target.open('w', encoding='utf-8', newline=''); [f.write(json.dumps({k: ds[i][k] for k in ds.column_names}, ensure_ascii=False) + chr(10)) for i in range(len(ds))]; f.close(); print(target)"
+```
+
+Network note:
+
+- downloading `SWE-bench_Verified` from Hugging Face requires outbound access to Hugging Face
+- running official/public cases against remote repositories also requires outbound access to GitHub for `git clone`
+- if GitHub is blocked, RepoPilot can still export predictions and parse official dataset rows locally, but end-to-end public-case execution will stop at repository preparation
+
 ## Current Limits
 
 RepoPilot is already a strong engineering agent prototype, but it is still short of the best frontier coding agents in a few places:

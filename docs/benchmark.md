@@ -49,10 +49,13 @@ Supported dataset inputs:
 - `jsonl`
 - `parquet`
 
+RepoPilot can also download `princeton-nlp/SWE-bench_Verified` directly through the Hugging Face `datasets` client and re-export it into a local JSONL file for repeatable local runs.
+
 This path is for recognized public evaluation workflow, but claims should remain conservative:
 
 - approximate runs are approximate if the checked-out repository snapshot is not the exact official base commit
 - authoritative pass rates must come from the official harness environment
+- end-to-end public-case execution still depends on outbound access to GitHub because the runner clones the target repository before diagnosis
 
 ## Run Commands
 
@@ -90,6 +93,12 @@ Public SWE-bench export path:
 
 ```powershell
 .\.venv\Scripts\python.exe run_swe_bench_style.py --cases benchmarks\swe_style_cases.json --dataset-path path\to\official_swe_bench.jsonl --dataset-name princeton-nlp/SWE-bench_Verified --dataset-split test --instance-id django__django-16527 --write-preds .repopilot\reports\all_preds.jsonl --write-json .repopilot\reports\official_eval_summary.json
+```
+
+Official dataset download and local export:
+
+```powershell
+.\.venv\Scripts\python.exe -c "from datasets import load_dataset; import json, pathlib; ds=load_dataset('princeton-nlp/SWE-bench_Verified', split='test'); target=pathlib.Path('.repopilot/official_datasets/swe_bench_verified_test_500.jsonl'); target.parent.mkdir(parents=True, exist_ok=True); f=target.open('w', encoding='utf-8', newline=''); [f.write(json.dumps({k: ds[i][k] for k in ds.column_names}, ensure_ascii=False) + chr(10)) for i in range(len(ds))]; f.close(); print(target)"
 ```
 
 Official harness scoring example:
