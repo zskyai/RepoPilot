@@ -107,12 +107,46 @@ def _load_rows_from_file(path: Path) -> list[dict[str, Any]]:
         return _load_rows_from_parquet(path)
     text = path.read_text(encoding="utf-8")
     if path.suffix == ".jsonl":
-        return [json.loads(line) for line in text.splitlines() if line.strip()]
-    payload = json.loads(text)
+        rows: list[dict[str, Any]] = []
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                item = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(item, dict):
+                rows.append(item)
+        if rows:
+            return rows
+        return _load_concatenated_json_objects(text)
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return _load_concatenated_json_objects(text)
     if isinstance(payload, dict):
         rows = payload.get("instances") or payload.get("rows") or payload.get("data") or []
         return [dict(item) for item in rows if isinstance(item, dict)]
     return [dict(item) for item in payload if isinstance(item, dict)]
+
+
+def _load_concatenated_json_objects(text: str) -> list[dict[str, Any]]:
+    decoder = json.JSONDecoder()
+    index = 0
+    length = len(text)
+    while index < length and text[index].isspace():
+        index += 1
+    if index >= length:
+        return []
+    try:
+        item, _ = decoder.raw_decode(text, index)
+    except json.JSONDecodeError:
+        return []
+    if isinstance(item, dict):
+        rows = item.get("instances") or item.get("rows") or item.get("data") or []
+        return [dict(entry) for entry in rows if isinstance(entry, dict)]
+    return [dict(entry) for entry in item if isinstance(entry, dict)]
 
 
 def _normalize_repo(repo: Any) -> str:
