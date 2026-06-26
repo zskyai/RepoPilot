@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from app.eval.swe_bench_public import (
     build_official_eval_instructions,
     load_official_swe_bench_cases,
@@ -75,8 +77,8 @@ def test_write_official_predictions_reads_patch_file(tmp_path: Path):
 
 
 def test_load_official_swe_bench_cases_from_parquet(tmp_path: Path):
-    import pyarrow as pa
-    import pyarrow.parquet as pq
+    pa = pytest.importorskip("pyarrow")
+    pq = pytest.importorskip("pyarrow.parquet")
 
     dataset = tmp_path / "official_cases.parquet"
     table = pa.table(

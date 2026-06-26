@@ -1,10 +1,25 @@
 # RepoPilot
 
-RepoPilot is a production-shaped coding agent for real repositories.
+RepoPilot is a repository-aware code understanding and automatic repair system for real software repositories.
 
-It is built for the part that matters in practice: take a repository issue, localize the relevant code, generate and validate patch candidates, challenge weak fixes, run sandbox verification, collect durable memory, and expose the reasoning path in a way an engineer can inspect.
+It focuses on the part that decides whether a coding agent is actually useful in practice: issue localization, structure-aware retrieval, patch generation, sandbox verification, adversarial review, repair memory, and benchmark-driven iteration.
 
-This is not a toy prompt wrapper. RepoPilot is meant to look and behave like a serious software engineering agent.
+## Highlights
+
+- repository-aware retrieval with lexical, dense, symbol, call, import, and graph signals
+- Tree-sitter + code-graph localization for cross-file bug analysis
+- multi-candidate patch generation with AST-aware and semantic rewrite strategies
+- sandbox-first patch validation with `git apply --check`, test execution, and repair replay
+- adversarial patch review, policy-aware ranking, and badcase analysis
+- SWE-bench-style evaluation pipeline with public-dataset parsing and harness-compatible prediction export
+
+## Project Positioning
+
+RepoPilot is designed as a strong large-model application project rather than a toy prompt demo:
+
+- **Problem**: repository bug fixing is not just code generation; it also requires localization, impact analysis, validation, and failure recovery.
+- **Method**: combine graph-aware retrieval, structured planning, patch portfolio ranking, tool verification, and memory replay into one repair loop.
+- **Outcome**: build a reusable workflow for repository issue -> candidate patch -> validation -> repair -> benchmark export.
 
 ## What RepoPilot Does
 
@@ -35,6 +50,15 @@ RepoPilot pushes deeper on the parts that decide whether a coding agent is actua
 - thread-aware memory hooks for multi-round workflows
 - compressed context packets for large-repo and long-run stability
 - decision-tree output for explainability
+
+## Representative Results
+
+These are project-internal validation signals used to guide iteration, not external leaderboard claims:
+
+- local test suite covers workflow, public SWE-bench parsing, graph-aware helpers, and patch selection logic
+- official/public evaluation pathway supports local `json`, `jsonl`, and `parquet` exports plus harness-compatible `all_preds.jsonl`
+- benchmark pipeline supports 12 official repository mirrors and 500-case batch execution flow
+- public-eval summaries track `strict_pass@1`, `env_adjusted_pass@1`, `average_overall`, path recall, repair rounds, and reproducibility tags
 
 ## Core Architecture
 
@@ -151,6 +175,12 @@ Important: local approximate runs are clearly labeled as approximate when the re
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -e .[dev]
+```
+
+If you want local parquet-based public-dataset parsing, install the benchmark extras as well:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -e .[dev,benchmark]
 ```
 
 ### 2. Configure
